@@ -8,3 +8,8 @@ delete_original: true
 client:
   impl: "api"    # api | mobile
   proxy: ""      # 例 http://127.0.0.1:7890
+
+# 子服务每次启动时，将 plugin/*.js 与 core/<target_core>/plugin/ 对比，不一致则覆盖
+deploy:
+  sync_qq_plugin_on_startup: true
+  target_core: "jm-Core"

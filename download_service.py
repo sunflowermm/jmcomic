@@ -182,10 +182,25 @@ async def file_handler(request: Request):
     )
 
 
+async def startup_init(_app):
+    sync_spec = importlib.util.spec_from_file_location(
+        "jmcomic_plugin.deploy_sync",
+        Path(__file__).resolve().parent / "deploy_sync.py",
+    )
+    sync_mod = importlib.util.module_from_spec(sync_spec)
+    sync_spec.loader.exec_module(sync_mod)
+    sync_mod.sync_qq_plugins(
+        _repo_root(),
+        target_core=config.get("deploy.target_core", "jm-Core"),
+        enabled=bool(config.get("deploy.sync_qq_plugin_on_startup", True)),
+    )
+
+
 default = {
     "name": "jmcomic-download",
     "description": "禁漫本子下载并导出 PDF",
     "priority": 200,
+    "init": startup_init,
     "routes": [
         {"method": "POST", "path": "/api/jmcomic/download", "handler": download_handler},
         {"method": "GET", "path": "/api/jmcomic/file", "handler": file_handler},

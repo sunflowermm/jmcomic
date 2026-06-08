@@ -41,6 +41,10 @@ def _builtin_default() -> Dict[str, Any]:
         "pdf_dir": "data/jmcomic/pdf",
         "delete_original": True,
         "client": {"impl": "api", "proxy": ""},
+        "deploy": {
+            "sync_qq_plugin_on_startup": True,
+            "target_core": "jm-Core",
+        },
     }
 
 

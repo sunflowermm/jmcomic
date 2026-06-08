@@ -13,6 +13,7 @@ New-Item -ItemType Directory -Force -Path $PyDest, $PluginDest | Out-Null
 $pyFiles = @(
     '__init__.py',
     'config_loader.py',
+    'deploy_sync.py',
     'download_service.py',
     'default_config.yaml',
     'requirements.txt',

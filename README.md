@@ -14,6 +14,7 @@ XRK-AGT **独立子服务插件**：禁漫本子下载 + PDF 导出 + 配套 QQ 
 ├── requirements.txt          # Python 依赖（仅本插件）
 ├── default_config.yaml       # 配置模板 → 首次运行复制到 data/jmcomic/config.yaml
 ├── config_loader.py
+├── deploy_sync.py            # 启动时同步 plugin/ → core/jm-Core/plugin/
 ├── download_service.py       # ApiLoader 热插拔入口
 ├── __init__.py
 ├── plugin/
@@ -99,7 +100,22 @@ delete_original: true
 client:
   impl: "api"    # api | mobile（被墙时可改 mobile）
   proxy: ""      # 例 http://127.0.0.1:7890
+deploy:
+  sync_qq_plugin_on_startup: true   # 子服务启动时自动同步 QQ 插件
+  target_core: "jm-Core"            # 同步目标 Core 名
 ```
+
+### QQ 插件自动同步
+
+**每次子服务启动**（加载本 API 的 `init` 钩子）会：
+
+1. 读取 `plugin/*.js`（源，以仓库内 `plugin/车牌.js` 为准）
+2. 与 `{AGT}/core/<target_core>/plugin/` 下同名文件**逐字节对比**
+3. **仅在不一致或目标不存在时**覆盖复制；内容相同则跳过
+
+关闭同步：在 `data/jmcomic/config.yaml` 设 `deploy.sync_qq_plugin_on_startup: false`。
+
+> 主服务需**重启或热加载插件**后，新的 `core/jm-Core/plugin/车牌.js` 才会被 Node 加载。
 
 ---
 

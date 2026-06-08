@@ -13,7 +13,7 @@ PLUGIN_DEST="$AGT_ROOT/core/jm-Core/plugin"
 
 mkdir -p "$PY_DEST" "$PLUGIN_DEST"
 
-for file in __init__.py config_loader.py download_service.py default_config.yaml requirements.txt README.md; do
+for file in __init__.py config_loader.py deploy_sync.py download_service.py default_config.yaml requirements.txt README.md; do
   src="$SCRIPT_DIR/$file"
   dest="$PY_DEST/$file"
   if [ "$(cd "$(dirname "$src")" && pwd -P)/$(basename "$src")" = "$(cd "$(dirname "$dest")" 2>/dev/null && pwd -P)/$(basename "$dest")" ]; then

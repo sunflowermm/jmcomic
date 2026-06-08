@@ -1,18 +1,16 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { parse as parseYaml } from 'yaml'
-import cfg from '#infrastructure/config/config.js'
 import { normalizeError } from '#utils/normalize-error.js'
 
 const RECALL_DELAY_MS = 120_000
 const DOWNLOAD_TIMEOUT_MS = 600_000
-const LOOPBACK_RE = /:\/\/(127(?:\.\d+){3}|localhost)(?:[:/]|$)/i
 
 export class ChepaiPlugin extends plugin {
   constructor() {
     super({
       name: '车牌插件',
-      dsc: '已有 PDF 直接发送；无缓存再下载；发送失败改公网直链，两分钟后撤回',
+      dsc: '下载 PDF 后先发直链，再上传群文件，两分钟后撤回',
       event: 'message',
       priority: 5000,
       rule: [{ reg: '^#车牌\\s*(.+)$', fnc: 'downloadPdf' }]
@@ -51,8 +49,7 @@ export class ChepaiPlugin extends plugin {
         logger.info(`[车牌] 子服务命中已有 PDF album=${albumId}`)
       }
 
-      const delivery = await this._deliverPdf(pdfPath, fileName, albumId)
-      const msgIds = this._extractMsgIds(delivery.msgRes)
+      const { msgIds } = await this._deliverPdf(result, pdfPath, fileName, albumId)
       if (msgIds.length) {
         setTimeout(() => this._recall(msgIds), RECALL_DELAY_MS)
       }
@@ -73,7 +70,7 @@ export class ChepaiPlugin extends plugin {
     try {
       await fs.access(localPath)
       return localPath
-    } catch { /* 本子跑在远程子服务上，本地无文件 */ }
+    } catch { /* 远程子服务，本地无 PDF */ }
 
     const cachePath = path.join(process.cwd(), 'data/jmcomic/cache', `${albumId}.pdf`)
     try {
@@ -93,81 +90,45 @@ export class ChepaiPlugin extends plugin {
     return cachePath
   }
 
-  async _deliverPdf(pdfPath, fileName, albumId) {
+  async _deliverPdf(result, pdfPath, fileName, albumId) {
     const stat = await fs.stat(pdfPath)
     const sizeMb = (stat.size / 1024 / 1024).toFixed(2)
     logger.info(`[车牌] PDF 就绪 album=${albumId} ${fileName} (${sizeMb}MB)`)
 
-    const msgRes = await this.reply([segment.file(pdfPath, fileName)])
-    if (!msgRes || msgRes.error || msgRes === false) {
-      const reason = Error.isError(msgRes?.error) ? msgRes.error.message : '发送失败'
-      logger.warn(`[车牌] 群文件发送失败 album=${albumId} (${sizeMb}MB)，改发直链: ${reason}`)
-      return this._sendDirectLink(pdfPath, fileName, sizeMb, albumId)
+    const msgIds = []
+    const url = await this._buildDirectLinkUrl(result)
+
+    if (url) {
+      const linkRes = await this.reply(`PDF 正在上传群文件，可先下载：\n${url}`)
+      msgIds.push(...this._extractMsgIds(linkRes))
     }
 
-    return { mode: 'file', msgRes }
+    const fileRes = await this.reply([segment.file(pdfPath, fileName)])
+    if (fileRes && !fileRes.error && fileRes !== false) {
+      msgIds.push(...this._extractMsgIds(fileRes))
+      return { mode: 'file', msgIds }
+    }
+
+    const reason = Error.isError(fileRes?.error) ? fileRes.error.message : '发送失败'
+    logger.warn(`[车牌] 群文件发送失败 album=${albumId} (${sizeMb}MB): ${reason}`)
+
+    if (url) {
+      return { mode: 'link-only', msgIds }
+    }
+
+    const fallback = await this.reply(
+      `PDF 已就绪（${sizeMb}MB），群文件发送失败且无法生成公网直链。请在 server.yaml 配置 server.url，或在 data/jmcomic/config.yaml 配置 public_base_url`
+    )
+    msgIds.push(...this._extractMsgIds(fallback))
+    return { mode: 'failed', msgIds }
   }
 
-  async _sendDirectLink(pdfPath, fileName, sizeMb, albumId) {
-    const mediaName = await this._publishToMedia(pdfPath, fileName, albumId)
-    const base = await this._resolvePublicBaseUrl()
-    if (!base) {
-      const msgRes = await this.reply(
-        `PDF 已就绪（${sizeMb}MB），群文件发送失败且无法生成公网直链。请在 server.yaml 配置 server.url，或在 data/jmcomic/config.yaml 配置 public_base_url`
-      )
-      return { mode: 'link-failed', msgRes }
-    }
-
-    const url = `${base}/media/jmcomic/${encodeURIComponent(mediaName)}`
-    let msgRes = await this.reply([segment.file(url, fileName)])
-    if (!msgRes || msgRes.error || msgRes === false) {
-      msgRes = await this.reply(url)
-    }
-    return { mode: 'link', msgRes }
-  }
-
-  async _resolvePublicBaseUrl() {
+  async _buildDirectLinkUrl(result) {
     const override = await this._readJmPublicBaseUrl()
-    if (override) return this._normalizeBaseUrl(override)
-
-    const configured = (cfg?.server?.server?.url || Bot.url || '').trim()
-    if (configured) {
-      const normalized = this._normalizeBaseUrl(configured)
-      if (normalized && !LOOPBACK_RE.test(normalized)) return normalized
-    }
-
-    const serverUrl = Bot.getServerUrl?.()
-    if (serverUrl && !LOOPBACK_RE.test(serverUrl)) {
-      return serverUrl.replace(/\/+$/, '')
-    }
-
-    if (typeof Bot.getLocalIpAddress !== 'function') return ''
-
-    const ipInfo = await Bot.getLocalIpAddress()
-    const protocol = cfg?.server?.https?.enabled === true ? 'https' : 'http'
-    const port = Bot.actualPort || Bot.httpPort
-    const needPort = (protocol === 'http' && port !== 80)
-      || (protocol === 'https' && port !== 443)
-    const portSuffix = needPort && port ? `:${port}` : ''
-
-    if (ipInfo?.public) {
-      return `${protocol}://${ipInfo.public}${portSuffix}`
-    }
-
-    const lan = ipInfo?.local?.find(item => item.primary) || ipInfo?.local?.[0]
-    if (lan?.ip) {
-      return `${protocol}://${lan.ip}${portSuffix}`
-    }
-
-    return ''
-  }
-
-  _normalizeBaseUrl(raw) {
-    const text = String(raw || '').trim().replace(/\/+$/, '')
-    if (!text) return ''
-    if (/^https?:\/\//i.test(text)) return text
-    const protocol = cfg?.server?.https?.enabled === true ? 'https' : 'http'
-    return `${protocol}://${text.replace(/^\/+/, '')}`
+    const base = await Bot.getPublicServerUrl(override)
+    if (!base) return ''
+    const params = new URLSearchParams({ path: result.pdf_path })
+    return `${base}/subserver-file?${params}`
   }
 
   async _readJmPublicBaseUrl() {
@@ -187,17 +148,6 @@ export class ChepaiPlugin extends plugin {
     const prefix = `[JM${albumId}]`
     return base === `${albumId}.pdf` || stem === albumId
       || stem.startsWith(prefix) || base.startsWith(prefix)
-  }
-
-  async _publishToMedia(pdfPath, fileName, albumId) {
-    const base = path.basename(fileName).replace(/[^\w.\-[\]()\u4e00-\u9fff]+/g, '_')
-      || `${albumId}.pdf`
-    const safeName = `${albumId}_${base}`
-    const mediaDir = path.join(process.cwd(), 'data/media/jmcomic')
-    await fs.mkdir(mediaDir, { recursive: true })
-    const dest = path.join(mediaDir, safeName)
-    await fs.copyFile(pdfPath, dest)
-    return safeName
   }
 
   _extractMsgIds(msgRes) {

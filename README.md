@@ -180,16 +180,11 @@ QQ 插件内部对下载请求单独使用 10 分钟超时，无需把全局 `ti
 #车牌123456
 ```
 
-流程：提示处理中 → **始终先尝试** `segment.file` 发群 PDF；仅当发送失败（含大文件 OneBot 60s 超时）→ 复制到 `data/media/jmcomic/` 并以 **公网直链** `segment.file(url)` 再试，仍失败则发纯 URL → **2 分钟后自动撤回**。
+流程：提示处理中 → PDF 就绪后 **先发直链**（`/subserver-file?path=…`）→ **再上传群文件**；直链与群文件消息均在 **2 分钟后撤回**。
 
-直链根地址解析顺序：
+直链示例：`https://你的域名:端口/subserver-file?path=data/jmcomic/pdf/643777.pdf`
 
-1. `data/jmcomic/config.yaml` 的 `public_base_url`
-2. `data/server_bots/{port}/server.yaml` 的 `server.url`（非 127/localhost）
-3. `Bot.getLocalIpAddress()` 检测到的公网 IP + HTTP 端口
-4. 局域网主 IP（最后兜底，仍不用 127）
-
-> `/media` 映射 `data/media`，`.pdf` 静态资源免 API 鉴权；公网需放行对应端口或反代。
+公网根地址：`Bot.getPublicServerUrl()`（优先 `server.url` / `public_base_url`）。**勿再用** `/media/jmcomic/…` 作 PDF 直链。
 
 ---
 

@@ -8,6 +8,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib.parse import quote
 
 import importlib.util
 
@@ -83,13 +84,15 @@ def _to_relative(path: Path) -> str:
 
 
 def _pdf_result(pdf_path: Path, album_id: str, *, cached: bool, elapsed: float = 0) -> Dict[str, Any]:
+    rel = _to_relative(pdf_path)
     return {
         "ok": True,
         "cached": cached,
         "album_id": album_id,
         "title": _extract_title(pdf_path, album_id),
-        "pdf_path": _to_relative(pdf_path),
+        "pdf_path": rel,
         "pdf_name": pdf_path.name,
+        "file_url": f"/api/jmcomic/file?path={quote(rel, safe='')}",
         "size": pdf_path.stat().st_size,
         "elapsed": elapsed,
     }

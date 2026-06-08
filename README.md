@@ -125,10 +125,12 @@ deploy:
 
 ```yaml
 subserver:
-  host: "127.0.0.1"      # Docker Compose 内改为 xrk-subserver
+  host: "127.0.0.1"      # 本子机跑子服务；多 AGT 共用填子服务所在机器 IP
   port: 8000
   timeout: 30000
 ```
+
+**多 AGT 共用一台子服务**：只有跑子服务的那台 AGT 本地有 `data/jmcomic/pdf/`。其它 AGT 通过 `Bot.fetchSubserverToPath` 经 `GET /api/jmcomic/file` 拉取到 `data/jmcomic/cache/`，无需在本机再装 jmcomic 依赖。
 
 QQ 插件内部对下载请求单独使用 10 分钟超时，无需把全局 `timeout` 调很大。
 
@@ -154,6 +156,7 @@ QQ 插件内部对下载请求单独使用 10 分钟超时，无需把全局 `ti
   "title": "本子标题",
   "pdf_path": "data/jmcomic/pdf/[JM123456]本子标题.pdf",
   "pdf_name": "[JM123456]本子标题.pdf",
+  "file_url": "/api/jmcomic/file?path=data/jmcomic/pdf/...",
   "size": 1048576,
   "elapsed": 0
 }

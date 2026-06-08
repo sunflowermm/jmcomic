@@ -39,26 +39,16 @@ export class ChepaiPlugin extends plugin {
         return false
       }
 
-      const pdfPath = path.isAbsolute(result.pdf_path)
-        ? result.pdf_path
-        : path.join(process.cwd(), result.pdf_path)
-
-      try {
-        await fs.access(pdfPath)
-      } catch {
-        await this.reply('PDF 文件不存在，请稍后重试')
-        return false
-      }
-
-      const fileName = result.pdf_name || path.basename(pdfPath)
+      const fileName = result.pdf_name || path.basename(result.pdf_path)
       if (!this._pdfMatchesAlbum(fileName, albumId)) {
         logger.error(`[车牌] 子服务返回了错误 PDF album=${albumId} file=${fileName}`)
         await this.reply(`PDF 与本子 ID 不匹配（请求 ${albumId}，得到 ${fileName}），请重试或删除 data/jmcomic/pdf 后重新下载`)
         return false
       }
 
+      const pdfPath = await this._resolvePdfPath(result, albumId)
       if (result.cached) {
-        logger.info(`[车牌] 使用已有 PDF album=${albumId}`)
+        logger.info(`[车牌] 子服务命中已有 PDF album=${albumId}`)
       }
 
       const delivery = await this._deliverPdf(pdfPath, fileName, albumId)
@@ -73,6 +63,34 @@ export class ChepaiPlugin extends plugin {
       await this.reply('处理失败，请确认 JM 子服务插件已部署且依赖已安装')
       return false
     }
+  }
+
+  async _resolvePdfPath(result, albumId) {
+    const localPath = path.isAbsolute(result.pdf_path)
+      ? result.pdf_path
+      : path.join(process.cwd(), result.pdf_path)
+
+    try {
+      await fs.access(localPath)
+      return localPath
+    } catch { /* 本子跑在远程子服务上，本地无文件 */ }
+
+    const cachePath = path.join(process.cwd(), 'data/jmcomic/cache', `${albumId}.pdf`)
+    try {
+      const stat = await fs.stat(cachePath)
+      if (!result.size || stat.size === result.size) {
+        logger.info(`[车牌] 使用本地缓存 album=${albumId}`)
+        return cachePath
+      }
+    } catch { /* 需从子服务拉取 */ }
+
+    await Bot.fetchSubserverToPath('/api/jmcomic/file', {
+      query: { path: result.pdf_path },
+      dest: cachePath,
+      timeout: DOWNLOAD_TIMEOUT_MS
+    })
+    logger.info(`[车牌] 已从子服务端拉取 PDF album=${albumId}`)
+    return cachePath
   }
 
   async _deliverPdf(pdfPath, fileName, albumId) {

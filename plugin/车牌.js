@@ -1,16 +1,18 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { parse as parseYaml } from 'yaml'
+import cfg from '#infrastructure/config/config.js'
 import { normalizeError } from '#utils/normalize-error.js'
 
 const RECALL_DELAY_MS = 120_000
 const DOWNLOAD_TIMEOUT_MS = 600_000
-const MAX_FILE_SEND_BYTES = 6 * 1024 * 1024
+const LOOPBACK_RE = /:\/\/(127(?:\.\d+){3}|localhost)(?:[:/]|$)/i
 
 export class ChepaiPlugin extends plugin {
   constructor() {
     super({
       name: '车牌插件',
-      dsc: '已有 PDF 直接发送；无缓存再下载；过大或超时改直链，两分钟后撤回',
+      dsc: '已有 PDF 直接发送；无缓存再下载；发送失败改公网直链，两分钟后撤回',
       event: 'message',
       priority: 5000,
       rule: [{ reg: '^#车牌\\s*(.+)$', fnc: 'downloadPdf' }]
@@ -53,7 +55,7 @@ export class ChepaiPlugin extends plugin {
         logger.info(`[车牌] 使用已有 PDF album=${albumId}`)
       }
 
-      const delivery = await this._deliverPdf(result, pdfPath, fileName)
+      const delivery = await this._deliverPdf(pdfPath, fileName)
       const msgIds = this._extractMsgIds(delivery.msgRes)
       if (msgIds.length) {
         setTimeout(() => this._recall(msgIds), RECALL_DELAY_MS)
@@ -67,39 +69,92 @@ export class ChepaiPlugin extends plugin {
     }
   }
 
-  async _deliverPdf(result, pdfPath, fileName) {
+  async _deliverPdf(pdfPath, fileName) {
     const stat = await fs.stat(pdfPath)
     const sizeMb = (stat.size / 1024 / 1024).toFixed(2)
     logger.info(`[车牌] PDF 就绪 ${fileName} (${sizeMb}MB)`)
 
-    if (stat.size > MAX_FILE_SEND_BYTES) {
-      return this._sendDownloadLink(result, pdfPath, fileName, sizeMb)
-    }
-
     const msgRes = await this.reply([segment.file(pdfPath, fileName)])
     if (!msgRes || msgRes.error || msgRes === false) {
       const reason = Error.isError(msgRes?.error) ? msgRes.error.message : '发送失败'
-      logger.warn(`[车牌] 文件发送失败(${sizeMb}MB)，改发直链: ${reason}`)
-      return this._sendDownloadLink(result, pdfPath, fileName, sizeMb)
+      logger.warn(`[车牌] 群文件发送失败(${sizeMb}MB)，改发直链: ${reason}`)
+      return this._sendDirectLink(pdfPath, fileName, sizeMb)
     }
 
     return { mode: 'file', msgRes }
   }
 
-  async _sendDownloadLink(result, pdfPath, fileName, sizeMb) {
+  async _sendDirectLink(pdfPath, fileName, sizeMb) {
     const mediaName = await this._publishToMedia(pdfPath, fileName)
-    const base = (Bot.getServerUrl?.() || Bot.url || '').replace(/\/+$/, '')
+    const base = await this._resolvePublicBaseUrl()
     if (!base) {
       const msgRes = await this.reply(
-        `PDF 已就绪（${sizeMb}MB），无法直发群文件，且未配置 Bot 外网地址`
+        `PDF 已就绪（${sizeMb}MB），群文件发送失败且无法生成公网直链。请在 server.yaml 配置 server.url，或在 data/jmcomic/config.yaml 配置 public_base_url`
       )
       return { mode: 'link-failed', msgRes }
     }
 
     const url = `${base}/media/jmcomic/${encodeURIComponent(mediaName)}`
-    const title = result.title || result.album_id
-    const msgRes = await this.reply(`PDF 已就绪（${sizeMb}MB）\n${title}\n下载：${url}`)
+    let msgRes = await this.reply([segment.file(url, fileName)])
+    if (!msgRes || msgRes.error || msgRes === false) {
+      msgRes = await this.reply(url)
+    }
     return { mode: 'link', msgRes }
+  }
+
+  async _resolvePublicBaseUrl() {
+    const override = await this._readJmPublicBaseUrl()
+    if (override) return this._normalizeBaseUrl(override)
+
+    const configured = (cfg?.server?.server?.url || Bot.url || '').trim()
+    if (configured) {
+      const normalized = this._normalizeBaseUrl(configured)
+      if (normalized && !LOOPBACK_RE.test(normalized)) return normalized
+    }
+
+    const serverUrl = Bot.getServerUrl?.()
+    if (serverUrl && !LOOPBACK_RE.test(serverUrl)) {
+      return serverUrl.replace(/\/+$/, '')
+    }
+
+    if (typeof Bot.getLocalIpAddress !== 'function') return ''
+
+    const ipInfo = await Bot.getLocalIpAddress()
+    const protocol = cfg?.server?.https?.enabled === true ? 'https' : 'http'
+    const port = Bot.actualPort || Bot.httpPort
+    const needPort = (protocol === 'http' && port !== 80)
+      || (protocol === 'https' && port !== 443)
+    const portSuffix = needPort && port ? `:${port}` : ''
+
+    if (ipInfo?.public) {
+      return `${protocol}://${ipInfo.public}${portSuffix}`
+    }
+
+    const lan = ipInfo?.local?.find(item => item.primary) || ipInfo?.local?.[0]
+    if (lan?.ip) {
+      return `${protocol}://${lan.ip}${portSuffix}`
+    }
+
+    return ''
+  }
+
+  _normalizeBaseUrl(raw) {
+    const text = String(raw || '').trim().replace(/\/+$/, '')
+    if (!text) return ''
+    if (/^https?:\/\//i.test(text)) return text
+    const protocol = cfg?.server?.https?.enabled === true ? 'https' : 'http'
+    return `${protocol}://${text.replace(/^\/+/, '')}`
+  }
+
+  async _readJmPublicBaseUrl() {
+    try {
+      const file = path.join(process.cwd(), 'data/jmcomic/config.yaml')
+      const text = await fs.readFile(file, 'utf8')
+      const data = parseYaml(text) || {}
+      return String(data.public_base_url || data.qq?.public_base_url || '').trim()
+    } catch {
+      return ''
+    }
   }
 
   async _publishToMedia(pdfPath, fileName) {

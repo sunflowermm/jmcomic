@@ -10,6 +10,10 @@ client:
   impl: "api"    # api | mobile
   proxy: ""      # 例 http://127.0.0.1:7890
 
+# 直链兜底时的公网根地址（可选，优先于 Bot 自动检测）
+# 例 https://bot.example.com 或 http://1.2.3.4:8086
+public_base_url: ""
+
 # 子服务每次启动时，将 plugin/*.js 与 core/<target_core>/plugin/ 对比，不一致则覆盖
 deploy:
   sync_qq_plugin_on_startup: true

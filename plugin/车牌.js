@@ -51,11 +51,17 @@ export class ChepaiPlugin extends plugin {
       }
 
       const fileName = result.pdf_name || path.basename(pdfPath)
+      if (!this._pdfMatchesAlbum(fileName, albumId)) {
+        logger.error(`[车牌] 子服务返回了错误 PDF album=${albumId} file=${fileName}`)
+        await this.reply(`PDF 与本子 ID 不匹配（请求 ${albumId}，得到 ${fileName}），请重试或删除 data/jmcomic/pdf 后重新下载`)
+        return false
+      }
+
       if (result.cached) {
         logger.info(`[车牌] 使用已有 PDF album=${albumId}`)
       }
 
-      const delivery = await this._deliverPdf(pdfPath, fileName)
+      const delivery = await this._deliverPdf(pdfPath, fileName, albumId)
       const msgIds = this._extractMsgIds(delivery.msgRes)
       if (msgIds.length) {
         setTimeout(() => this._recall(msgIds), RECALL_DELAY_MS)
@@ -69,23 +75,23 @@ export class ChepaiPlugin extends plugin {
     }
   }
 
-  async _deliverPdf(pdfPath, fileName) {
+  async _deliverPdf(pdfPath, fileName, albumId) {
     const stat = await fs.stat(pdfPath)
     const sizeMb = (stat.size / 1024 / 1024).toFixed(2)
-    logger.info(`[车牌] PDF 就绪 ${fileName} (${sizeMb}MB)`)
+    logger.info(`[车牌] PDF 就绪 album=${albumId} ${fileName} (${sizeMb}MB)`)
 
     const msgRes = await this.reply([segment.file(pdfPath, fileName)])
     if (!msgRes || msgRes.error || msgRes === false) {
       const reason = Error.isError(msgRes?.error) ? msgRes.error.message : '发送失败'
-      logger.warn(`[车牌] 群文件发送失败(${sizeMb}MB)，改发直链: ${reason}`)
-      return this._sendDirectLink(pdfPath, fileName, sizeMb)
+      logger.warn(`[车牌] 群文件发送失败 album=${albumId} (${sizeMb}MB)，改发直链: ${reason}`)
+      return this._sendDirectLink(pdfPath, fileName, sizeMb, albumId)
     }
 
     return { mode: 'file', msgRes }
   }
 
-  async _sendDirectLink(pdfPath, fileName, sizeMb) {
-    const mediaName = await this._publishToMedia(pdfPath, fileName)
+  async _sendDirectLink(pdfPath, fileName, sizeMb, albumId) {
+    const mediaName = await this._publishToMedia(pdfPath, fileName, albumId)
     const base = await this._resolvePublicBaseUrl()
     if (!base) {
       const msgRes = await this.reply(
@@ -157,9 +163,18 @@ export class ChepaiPlugin extends plugin {
     }
   }
 
-  async _publishToMedia(pdfPath, fileName) {
-    const safeName = path.basename(fileName).replace(/[^\w.\-[\]()\u4e00-\u9fff]+/g, '_')
-      || `album-${Date.now()}.pdf`
+  _pdfMatchesAlbum(fileName, albumId) {
+    const base = path.basename(fileName)
+    const stem = base.replace(/\.pdf$/i, '')
+    const prefix = `[JM${albumId}]`
+    return base === `${albumId}.pdf` || stem === albumId
+      || stem.startsWith(prefix) || base.startsWith(prefix)
+  }
+
+  async _publishToMedia(pdfPath, fileName, albumId) {
+    const base = path.basename(fileName).replace(/[^\w.\-[\]()\u4e00-\u9fff]+/g, '_')
+      || `${albumId}.pdf`
+    const safeName = `${albumId}_${base}`
     const mediaDir = path.join(process.cwd(), 'data/media/jmcomic')
     await fs.mkdir(mediaDir, { recursive: true })
     const dest = path.join(mediaDir, safeName)

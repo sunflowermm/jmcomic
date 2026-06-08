@@ -45,19 +45,26 @@ def _storage_dirs() -> tuple[Path, Path]:
     return download_dir, pdf_dir
 
 
-def _find_pdf(pdf_dir: Path, album_id: str) -> Optional[Path]:
-    candidates: list[Path] = []
-    for pattern in (f"[JM{album_id}]*.pdf", f"*{album_id}*.pdf", f"{album_id}.pdf"):
-        candidates.extend(pdf_dir.glob(pattern))
+def _pdf_belongs_to_album(path: Path, album_id: str) -> bool:
+    """按文件名判断 PDF 是否属于指定本子（禁止 glob 的 [] 字符类误匹配）。"""
+    name = path.name
+    stem = path.stem
+    jm_prefix = f"[JM{album_id}]"
+    if name == f"{album_id}.pdf" or stem == album_id:
+        return True
+    if stem.startswith(jm_prefix) or name.startswith(jm_prefix):
+        return True
+    return False
 
+
+def _find_pdf(pdf_dir: Path, album_id: str) -> Optional[Path]:
+    candidates = [
+        p for p in pdf_dir.glob("*.pdf")
+        if p.is_file() and _pdf_belongs_to_album(p, album_id)
+    ]
     if not candidates:
         return None
-
-    unique = {p.resolve(): p for p in candidates if p.is_file()}
-    if not unique:
-        return None
-
-    return max(unique.values(), key=lambda p: p.stat().st_mtime)
+    return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
 def _extract_title(pdf_path: Path, album_id: str) -> str:

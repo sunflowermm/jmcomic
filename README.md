@@ -161,6 +161,8 @@ QQ 插件内部对下载请求单独使用 10 分钟超时，无需把全局 `ti
 
 `cached: true` 表示 `data/jmcomic/pdf/` 已有该本子 PDF，跳过下载。可在 `data/jmcomic/config.yaml` 设 `reuse_existing_pdf: false` 强制重新下载。
 
+> PDF 缓存按文件名精确匹配 `[JM{id}]…` 或 `{id}.pdf`，**不会**用 glob 的 `[]` 模式（否则会误命中其他本子，例如始终把 `1375860.pdf` 当成缓存）。
+
 ### `GET /api/jmcomic/file?path=...`
 
 按相对项目根路径下载 PDF（路径限制在 `pdf_dir` 内）。

@@ -1,0 +1,10 @@
+# JM 子服务插件默认配置
+# 首次加载时复制到 data/jmcomic/config.yaml（勿写入 AGT 本体 config/default_config/）
+
+download_dir: "data/jmcomic/download"
+pdf_dir: "data/jmcomic/pdf"
+delete_original: true
+
+client:
+  impl: "api"    # api | mobile
+  proxy: ""      # 例 http://127.0.0.1:7890

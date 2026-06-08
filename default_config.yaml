@@ -4,6 +4,7 @@
 download_dir: "data/jmcomic/download"
 pdf_dir: "data/jmcomic/pdf"
 delete_original: true
+reuse_existing_pdf: true   # data/jmcomic/pdf 已有则直接返回，不重新下载
 
 client:
   impl: "api"    # api | mobile

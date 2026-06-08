@@ -149,14 +149,17 @@ QQ 插件内部对下载请求单独使用 10 分钟超时，无需把全局 `ti
 ```json
 {
   "ok": true,
+  "cached": true,
   "album_id": "123456",
   "title": "本子标题",
   "pdf_path": "data/jmcomic/pdf/[JM123456]本子标题.pdf",
   "pdf_name": "[JM123456]本子标题.pdf",
   "size": 1048576,
-  "elapsed": 42.5
+  "elapsed": 0
 }
 ```
+
+`cached: true` 表示 `data/jmcomic/pdf/` 已有该本子 PDF，跳过下载。可在 `data/jmcomic/config.yaml` 设 `reuse_existing_pdf: false` 强制重新下载。
 
 ### `GET /api/jmcomic/file?path=...`
 

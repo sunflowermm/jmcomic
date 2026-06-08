@@ -45,6 +45,49 @@ def _storage_dirs() -> tuple[Path, Path]:
     return download_dir, pdf_dir
 
 
+def _find_pdf(pdf_dir: Path, album_id: str) -> Optional[Path]:
+    candidates: list[Path] = []
+    for pattern in (f"[JM{album_id}]*.pdf", f"*{album_id}*.pdf", f"{album_id}.pdf"):
+        candidates.extend(pdf_dir.glob(pattern))
+
+    if not candidates:
+        return None
+
+    unique = {p.resolve(): p for p in candidates if p.is_file()}
+    if not unique:
+        return None
+
+    return max(unique.values(), key=lambda p: p.stat().st_mtime)
+
+
+def _extract_title(pdf_path: Path, album_id: str) -> str:
+    title = pdf_path.stem
+    prefix = f"[JM{album_id}]"
+    if title.startswith(prefix):
+        title = title[len(prefix) :]
+    return title or pdf_path.stem
+
+
+def _to_relative(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(_repo_root().resolve()).as_posix()
+    except ValueError:
+        return str(path.resolve())
+
+
+def _pdf_result(pdf_path: Path, album_id: str, *, cached: bool, elapsed: float = 0) -> Dict[str, Any]:
+    return {
+        "ok": True,
+        "cached": cached,
+        "album_id": album_id,
+        "title": _extract_title(pdf_path, album_id),
+        "pdf_path": _to_relative(pdf_path),
+        "pdf_name": pdf_path.name,
+        "size": pdf_path.stat().st_size,
+        "elapsed": elapsed,
+    }
+
+
 def _build_option(download_dir: Path):
     import jmcomic
 
@@ -62,44 +105,21 @@ def _build_option(download_dir: Path):
     return option
 
 
-def _find_pdf(pdf_dir: Path, album_id: str) -> Optional[Path]:
-    patterns = [
-        f"[JM{album_id}]*.pdf",
-        f"*{album_id}*.pdf",
-    ]
-    candidates: list[Path] = []
-    for pattern in patterns:
-        candidates.extend(pdf_dir.glob(pattern))
-
-    if not candidates:
-        candidates = list(pdf_dir.glob("*.pdf"))
-
-    if not candidates:
-        return None
-
-    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    for path in candidates:
-        if album_id in path.name:
-            return path
-    return candidates[0]
-
-
-def _to_relative(path: Path) -> str:
-    try:
-        return path.resolve().relative_to(_repo_root().resolve()).as_posix()
-    except ValueError:
-        return str(path.resolve())
-
-
 def _download_sync(album_id: str) -> Dict[str, Any]:
+    download_dir, pdf_dir = _storage_dirs()
+
+    if config.get("reuse_existing_pdf", True):
+        existing = _find_pdf(pdf_dir, album_id)
+        if existing:
+            logger.info("本子 %s 命中已有 PDF，跳过下载: %s", album_id, existing.name)
+            return _pdf_result(existing, album_id, cached=True)
+
     from jmcomic import Feature, download_album
 
-    download_dir, pdf_dir = _storage_dirs()
     option = _build_option(download_dir)
     delete_original = bool(config.get("delete_original", True))
-
     started = time.time()
-    logger.info("开始下载本子 %s", album_id)
+    logger.info("本子 %s 开始下载", album_id)
 
     download_album(
         album_id,
@@ -112,25 +132,12 @@ def _download_sync(album_id: str) -> Dict[str, Any]:
     )
 
     pdf_path = _find_pdf(pdf_dir, album_id)
-    if not pdf_path or not pdf_path.is_file():
+    if not pdf_path:
         raise RuntimeError("PDF 生成失败，未在输出目录找到文件")
-
-    title = pdf_path.stem
-    if title.startswith(f"[JM{album_id}]"):
-        title = title[len(f"[JM{album_id}]") :]
 
     elapsed = round(time.time() - started, 2)
     logger.info("本子 %s 下载完成，PDF=%s，耗时 %.2fs", album_id, pdf_path.name, elapsed)
-
-    return {
-        "ok": True,
-        "album_id": album_id,
-        "title": title or pdf_path.stem,
-        "pdf_path": _to_relative(pdf_path),
-        "pdf_name": pdf_path.name,
-        "size": pdf_path.stat().st_size,
-        "elapsed": elapsed,
-    }
+    return _pdf_result(pdf_path, album_id, cached=False, elapsed=elapsed)
 
 
 async def download_handler(request: Request):

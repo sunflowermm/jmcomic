@@ -40,6 +40,7 @@ def _builtin_default() -> Dict[str, Any]:
         "download_dir": "data/jmcomic/download",
         "pdf_dir": "data/jmcomic/pdf",
         "delete_original": True,
+        "reuse_existing_pdf": True,
         "client": {"impl": "api", "proxy": ""},
         "deploy": {
             "sync_qq_plugin_on_startup": True,

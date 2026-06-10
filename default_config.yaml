@@ -5,6 +5,7 @@ download_dir: "data/jmcomic/download"
 pdf_dir: "data/jmcomic/pdf"
 delete_original: true
 reuse_existing_pdf: true   # data/jmcomic/pdf 已有则直接返回，不重新下载
+max_concurrent_downloads: 1  # 同时仅 1 个下载任务，避免多本并行撑爆内存（4G 机器建议保持 1）
 
 client:
   impl: "api"    # api | mobile
@@ -13,6 +14,9 @@ client:
 # 直链兜底时的公网根地址（可选，优先于 Bot 自动检测）
 # 例 https://bot.example.com 或 http://1.2.3.4:8086
 public_base_url: ""
+
+qq:
+  cache_max_files: 30   # 主服务 data/jmcomic/cache 最多保留份数，超出删最旧
 
 # 子服务每次启动时，将 plugin/*.js 与 core/<target_core>/plugin/ 对比，不一致则覆盖
 deploy:

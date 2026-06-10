@@ -5,6 +5,7 @@ import { normalizeError } from '#utils/normalize-error.js'
 
 const RECALL_DELAY_MS = 120_000
 const DOWNLOAD_TIMEOUT_MS = 600_000
+const DEFAULT_CACHE_MAX_FILES = 30
 
 export class ChepaiPlugin extends plugin {
   constructor() {
@@ -15,6 +16,7 @@ export class ChepaiPlugin extends plugin {
       priority: 5000,
       rule: [{ reg: '^#车牌\\s*(.+)$', fnc: 'downloadPdf' }]
     })
+    this._recallTimers = new Set()
   }
 
   async downloadPdf() {
@@ -49,9 +51,15 @@ export class ChepaiPlugin extends plugin {
         logger.info(`[车牌] 子服务命中已有 PDF album=${albumId}`)
       }
 
+      await this._pruneLocalCache(albumId)
+
       const { msgIds } = await this._deliverPdf(result, pdfPath, fileName, albumId)
       if (msgIds.length) {
-        setTimeout(() => this._recall(msgIds), RECALL_DELAY_MS)
+        const timer = setTimeout(() => {
+          this._recallTimers.delete(timer)
+          this._recall(msgIds)
+        }, RECALL_DELAY_MS)
+        this._recallTimers.add(timer)
       }
       return true
     } catch (err) {
@@ -81,13 +89,61 @@ export class ChepaiPlugin extends plugin {
       }
     } catch { /* 需从子服务拉取 */ }
 
+    if (typeof Bot.fetchSubserverToPath !== 'function') {
+      throw new Error('Bot.fetchSubserverToPath 未挂载，请更新主服务')
+    }
+
     await Bot.fetchSubserverToPath('/api/jmcomic/file', {
       query: { path: result.pdf_path },
       dest: cachePath,
       timeout: DOWNLOAD_TIMEOUT_MS
     })
-    logger.info(`[车牌] 已从子服务端拉取 PDF album=${albumId}`)
+    logger.info(`[车牌] 已从子服务端流式拉取 PDF album=${albumId}`)
     return cachePath
+  }
+
+  async _pruneLocalCache(keepAlbumId) {
+    const maxFiles = await this._readCacheMaxFiles()
+    const cacheDir = path.join(process.cwd(), 'data/jmcomic/cache')
+    try {
+      const entries = await fs.readdir(cacheDir)
+      const files = []
+      for (const name of entries) {
+        if (!name.endsWith('.pdf')) continue
+        const full = path.join(cacheDir, name)
+        const stat = await fs.stat(full)
+        files.push({ full, name, mtime: stat.mtimeMs })
+      }
+      if (files.length <= maxFiles) return
+
+      files.sort((a, b) => a.mtime - b.mtime)
+      const keepName = `${keepAlbumId}.pdf`
+      let removed = 0
+      for (const item of files) {
+        if (files.length - removed <= maxFiles) break
+        if (item.name === keepName) continue
+        await fs.unlink(item.full).catch(() => {})
+        removed += 1
+      }
+      if (removed > 0) {
+        logger.info(`[车牌] 已清理 ${removed} 个过期 PDF 缓存`)
+      }
+    } catch {
+      /* cache 目录不存在时忽略 */
+    }
+  }
+
+  async _readCacheMaxFiles() {
+    try {
+      const file = path.join(process.cwd(), 'data/jmcomic/config.yaml')
+      const text = await fs.readFile(file, 'utf8')
+      const data = parseYaml(text) || {}
+      const raw = data.qq?.cache_max_files ?? data.cache_max_files
+      const n = Number(raw)
+      return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_CACHE_MAX_FILES
+    } catch {
+      return DEFAULT_CACHE_MAX_FILES
+    }
   }
 
   async _deliverPdf(result, pdfPath, fileName, albumId) {
@@ -169,5 +225,13 @@ export class ChepaiPlugin extends plugin {
         logger.debug(`[车牌] 撤回失败 msgId=${id}: ${normalizeError(recallErr).message}`)
       })
     }
+  }
+
+  /** 插件卸载时清理挂起的撤回定时器 */
+  destroy() {
+    for (const timer of this._recallTimers) {
+      clearTimeout(timer)
+    }
+    this._recallTimers.clear()
   }
 }

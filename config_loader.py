@@ -41,8 +41,12 @@ def _builtin_default() -> Dict[str, Any]:
         "pdf_dir": "data/jmcomic/pdf",
         "delete_original": True,
         "reuse_existing_pdf": True,
+        "max_concurrent_downloads": 1,
         "client": {"impl": "api", "proxy": ""},
         "public_base_url": "",
+        "qq": {
+            "cache_max_files": 30,
+        },
         "deploy": {
             "sync_qq_plugin_on_startup": True,
             "target_core": "jm-Core",

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import gc
 import logging
 import re
+import shutil
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 from urllib.parse import quote
 
 import importlib.util
@@ -28,6 +31,43 @@ logger = logging.getLogger(__name__)
 config = get_config()
 
 _ALBUM_ID_RE = re.compile(r"^\d+$")
+_PDF_INDEX: Dict[str, Tuple[float, str]] = {}
+_download_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
+_download_semaphore: Optional[asyncio.Semaphore] = None
+
+
+def _max_concurrent() -> int:
+    raw = config.get("max_concurrent_downloads", 1)
+    try:
+        return max(1, min(int(raw or 1), 2))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _ensure_download_pool() -> Tuple[asyncio.Semaphore, concurrent.futures.ThreadPoolExecutor]:
+    global _download_executor, _download_semaphore
+    limit = _max_concurrent()
+    if _download_semaphore is None:
+        _download_semaphore = asyncio.Semaphore(limit)
+    if _download_executor is None:
+        _download_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=limit,
+            thread_name_prefix="jmcomic",
+        )
+    return _download_semaphore, _download_executor
+
+
+def _log_memory(tag: str) -> None:
+    try:
+        import resource
+
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        # Linux: KB；macOS: bytes
+        rss = usage.ru_maxrss
+        rss_mb = rss / 1024 if rss > 10_000_000 else rss / 1024
+        logger.debug("[jmcomic] %s RSS≈%.1fMB", tag, rss_mb)
+    except Exception:
+        pass
 
 
 def _resolve_dir(key: str, fallback: Path) -> Path:
@@ -59,13 +99,40 @@ def _pdf_belongs_to_album(path: Path, album_id: str) -> bool:
 
 
 def _find_pdf(pdf_dir: Path, album_id: str) -> Optional[Path]:
-    candidates = [
-        p for p in pdf_dir.glob("*.pdf")
-        if p.is_file() and _pdf_belongs_to_album(p, album_id)
-    ]
+    cached = _PDF_INDEX.get(album_id)
+    if cached:
+        mtime, path_str = cached
+        candidate = Path(path_str)
+        if candidate.is_file():
+            try:
+                if candidate.stat().st_mtime == mtime:
+                    return candidate
+            except OSError:
+                pass
+        _PDF_INDEX.pop(album_id, None)
+
+    candidates: list[Path] = []
+    direct = pdf_dir / f"{album_id}.pdf"
+    if direct.is_file():
+        candidates.append(direct)
+
+    try:
+        for path in pdf_dir.iterdir():
+            if not path.is_file() or path.suffix.lower() != ".pdf":
+                continue
+            if path == direct:
+                continue
+            if _pdf_belongs_to_album(path, album_id):
+                candidates.append(path)
+    except OSError as exc:
+        logger.warning("扫描 PDF 目录失败: %s", exc)
+
     if not candidates:
         return None
-    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+    best = max(candidates, key=lambda p: p.stat().st_mtime)
+    _PDF_INDEX[album_id] = (best.stat().st_mtime, str(best.resolve()))
+    return best
 
 
 def _extract_title(pdf_path: Path, album_id: str) -> str:
@@ -115,39 +182,64 @@ def _build_option(download_dir: Path):
     return option
 
 
+def _cleanup_leftover(download_dir: Path, album_id: str) -> None:
+    """下载/转 PDF 后清理残留原图目录，避免磁盘与库内缓存长期堆积。"""
+    if not download_dir.exists():
+        return
+    markers = (album_id, f"[JM{album_id}]")
+    image_ext = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
+    for child in list(download_dir.iterdir()):
+        name = child.name
+        if not any(marker in name for marker in markers):
+            continue
+        try:
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            elif child.is_file() and child.suffix.lower() in image_ext:
+                child.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.debug("清理残留失败 %s: %s", child, exc)
+
+
 def _download_sync(album_id: str) -> Dict[str, Any]:
     download_dir, pdf_dir = _storage_dirs()
+    _log_memory(f"download:{album_id}:start")
 
-    if config.get("reuse_existing_pdf", True):
-        existing = _find_pdf(pdf_dir, album_id)
-        if existing:
-            logger.info("本子 %s 命中已有 PDF，跳过下载: %s", album_id, existing.name)
-            return _pdf_result(existing, album_id, cached=True)
+    try:
+        if config.get("reuse_existing_pdf", True):
+            existing = _find_pdf(pdf_dir, album_id)
+            if existing:
+                logger.info("本子 %s 命中已有 PDF，跳过下载: %s", album_id, existing.name)
+                return _pdf_result(existing, album_id, cached=True)
 
-    from jmcomic import Feature, download_album
+        from jmcomic import Feature, download_album
 
-    option = _build_option(download_dir)
-    delete_original = bool(config.get("delete_original", True))
-    started = time.time()
-    logger.info("本子 %s 开始下载", album_id)
+        option = _build_option(download_dir)
+        delete_original = bool(config.get("delete_original", True))
+        started = time.time()
+        logger.info("本子 %s 开始下载", album_id)
 
-    download_album(
-        album_id,
-        option,
-        extra=Feature.export_pdf(
-            pdf_dir=str(pdf_dir),
-            filename_rule="Aid",
-            delete_original_file=delete_original,
-        ),
-    )
+        download_album(
+            album_id,
+            option,
+            extra=Feature.export_pdf(
+                pdf_dir=str(pdf_dir),
+                filename_rule="Aid",
+                delete_original_file=delete_original,
+            ),
+        )
 
-    pdf_path = _find_pdf(pdf_dir, album_id)
-    if not pdf_path:
-        raise RuntimeError("PDF 生成失败，未在输出目录找到文件")
+        pdf_path = _find_pdf(pdf_dir, album_id)
+        if not pdf_path:
+            raise RuntimeError("PDF 生成失败，未在输出目录找到文件")
 
-    elapsed = round(time.time() - started, 2)
-    logger.info("本子 %s 下载完成，PDF=%s，耗时 %.2fs", album_id, pdf_path.name, elapsed)
-    return _pdf_result(pdf_path, album_id, cached=False, elapsed=elapsed)
+        elapsed = round(time.time() - started, 2)
+        logger.info("本子 %s 下载完成，PDF=%s，耗时 %.2fs", album_id, pdf_path.name, elapsed)
+        return _pdf_result(pdf_path, album_id, cached=False, elapsed=elapsed)
+    finally:
+        _cleanup_leftover(download_dir, album_id)
+        gc.collect()
+        _log_memory(f"download:{album_id}:done")
 
 
 async def download_handler(request: Request):
@@ -160,8 +252,11 @@ async def download_handler(request: Request):
     if not _ALBUM_ID_RE.fullmatch(album_id):
         raise HTTPException(status_code=400, detail="album_id 必须为纯数字")
 
+    semaphore, executor = _ensure_download_pool()
     try:
-        return await asyncio.to_thread(_download_sync, album_id)
+        async with semaphore:
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(executor, _download_sync, album_id)
     except HTTPException:
         raise
     except Exception as exc:
@@ -211,6 +306,18 @@ async def startup_init(_app):
         target_core=config.get("deploy.target_core", "jm-Core"),
         enabled=bool(config.get("deploy.sync_qq_plugin_on_startup", True)),
     )
+    logger.info("JMComic 下载并发上限: %d", _max_concurrent())
+
+
+async def shutdown_cleanup(_app):
+    global _download_executor, _download_semaphore
+    _PDF_INDEX.clear()
+    if _download_executor is not None:
+        _download_executor.shutdown(wait=False, cancel_futures=True)
+        _download_executor = None
+    _download_semaphore = None
+    gc.collect()
+    logger.info("JMComic 资源已释放")
 
 
 default = {
@@ -218,6 +325,7 @@ default = {
     "description": "禁漫本子下载并导出 PDF",
     "priority": 200,
     "init": startup_init,
+    "shutdown": shutdown_cleanup,
     "routes": [
         {"method": "POST", "path": "/api/jmcomic/download", "handler": download_handler},
         {"method": "GET", "path": "/api/jmcomic/file", "handler": file_handler},

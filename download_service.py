@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse
 
 _config_spec = importlib.util.spec_from_file_location(
     "jmcomic_plugin.config_loader",
-    Path(__file__).resolve().parent / "config_loader.py",
+    Path(__file__).resolve().parent / "_config_loader.py",
 )
 _config_mod = importlib.util.module_from_spec(_config_spec)
 if _config_spec.name:
@@ -32,7 +32,7 @@ _repo_root = _config_mod._repo_root
 
 _compress_spec = importlib.util.spec_from_file_location(
     "jmcomic_plugin.pdf_compress",
-    Path(__file__).resolve().parent / "pdf_compress.py",
+    Path(__file__).resolve().parent / "_pdf_compress.py",
 )
 _compress_mod = importlib.util.module_from_spec(_compress_spec)
 if _compress_spec.name:
@@ -339,9 +339,11 @@ async def file_handler(request: Request):
 async def startup_init(_app):
     sync_spec = importlib.util.spec_from_file_location(
         "jmcomic_plugin.deploy_sync",
-        Path(__file__).resolve().parent / "deploy_sync.py",
+        Path(__file__).resolve().parent / "_deploy_sync.py",
     )
     sync_mod = importlib.util.module_from_spec(sync_spec)
+    if sync_spec.name:
+        sys.modules[sync_spec.name] = sync_mod
     sync_spec.loader.exec_module(sync_mod)
     sync_mod.sync_qq_plugins(
         _repo_root(),

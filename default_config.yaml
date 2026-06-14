@@ -7,6 +7,15 @@ delete_original: true
 reuse_existing_pdf: true   # data/jmcomic/pdf 已有则直接返回，不重新下载
 max_concurrent_downloads: 1  # 同时仅 1 个下载任务，避免多本并行撑爆内存（4G 机器建议保持 1）
 
+# PDF 体积优化（下载完成后自动压缩，典型可缩小 5～10 倍）
+pdf_compress:
+  enabled: true
+  jpeg_quality: 84           # 80～88：画质与体积平衡；越低越小
+  max_image_width: 1800      # 宽/高超此值等比缩小，0=不缩放
+  min_bytes: 262144          # 小于 256KB 不压缩
+  min_savings_ratio: 0.05    # 体积减少不足 5% 则保留原文件
+  optimize_cached: true      # 命中旧 PDF 缓存时仍尝试补压缩（无 .jmcompress 标记时）
+
 client:
   impl: "api"    # api | mobile
   proxy: ""      # 例 http://127.0.0.1:7890

@@ -42,6 +42,14 @@ def _builtin_default() -> Dict[str, Any]:
         "delete_original": True,
         "reuse_existing_pdf": True,
         "max_concurrent_downloads": 1,
+        "pdf_compress": {
+            "enabled": True,
+            "jpeg_quality": 84,
+            "max_image_width": 1800,
+            "min_bytes": 262144,
+            "min_savings_ratio": 0.05,
+            "optimize_cached": True,
+        },
         "client": {"impl": "api", "proxy": ""},
         "public_base_url": "",
         "qq": {

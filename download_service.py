@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional, Tuple
 from urllib.parse import quote
 
 import importlib.util
+import sys
 
 from fastapi import HTTPException, Request
 from fastapi.responses import FileResponse
@@ -23,9 +24,21 @@ _config_spec = importlib.util.spec_from_file_location(
     Path(__file__).resolve().parent / "config_loader.py",
 )
 _config_mod = importlib.util.module_from_spec(_config_spec)
+if _config_spec.name:
+    sys.modules[_config_spec.name] = _config_mod
 _config_spec.loader.exec_module(_config_mod)
 get_config = _config_mod.get_config
 _repo_root = _config_mod._repo_root
+
+_compress_spec = importlib.util.spec_from_file_location(
+    "jmcomic_plugin.pdf_compress",
+    Path(__file__).resolve().parent / "pdf_compress.py",
+)
+_compress_mod = importlib.util.module_from_spec(_compress_spec)
+if _compress_spec.name:
+    sys.modules[_compress_spec.name] = _compress_mod
+_compress_spec.loader.exec_module(_compress_mod)
+maybe_optimize_pdf = _compress_mod.maybe_optimize_pdf
 
 logger = logging.getLogger(__name__)
 config = get_config()
@@ -150,9 +163,16 @@ def _to_relative(path: Path) -> str:
         return str(path.resolve())
 
 
-def _pdf_result(pdf_path: Path, album_id: str, *, cached: bool, elapsed: float = 0) -> Dict[str, Any]:
+def _pdf_result(
+    pdf_path: Path,
+    album_id: str,
+    *,
+    cached: bool,
+    elapsed: float = 0,
+    compress_outcome=None,
+) -> Dict[str, Any]:
     rel = _to_relative(pdf_path)
-    return {
+    result: Dict[str, Any] = {
         "ok": True,
         "cached": cached,
         "album_id": album_id,
@@ -163,6 +183,15 @@ def _pdf_result(pdf_path: Path, album_id: str, *, cached: bool, elapsed: float =
         "size": pdf_path.stat().st_size,
         "elapsed": elapsed,
     }
+    if compress_outcome and compress_outcome.compressed:
+        result["compressed"] = True
+        result["size_before"] = compress_outcome.original_size
+        result["compress_ratio"] = round(compress_outcome.ratio, 4)
+    return result
+
+
+def _optimize_pdf_output(pdf_path: Path, *, cached: bool):
+    return maybe_optimize_pdf(pdf_path, config, cached=cached)
 
 
 def _build_option(download_dir: Path):
@@ -210,7 +239,13 @@ def _download_sync(album_id: str) -> Dict[str, Any]:
             existing = _find_pdf(pdf_dir, album_id)
             if existing:
                 logger.info("本子 %s 命中已有 PDF，跳过下载: %s", album_id, existing.name)
-                return _pdf_result(existing, album_id, cached=True)
+                compressed = _optimize_pdf_output(existing, cached=True)
+                return _pdf_result(
+                    existing,
+                    album_id,
+                    cached=True,
+                    compress_outcome=compressed,
+                )
 
         from jmcomic import Feature, download_album
 
@@ -233,9 +268,16 @@ def _download_sync(album_id: str) -> Dict[str, Any]:
         if not pdf_path:
             raise RuntimeError("PDF 生成失败，未在输出目录找到文件")
 
+        compressed = _optimize_pdf_output(pdf_path, cached=False)
         elapsed = round(time.time() - started, 2)
         logger.info("本子 %s 下载完成，PDF=%s，耗时 %.2fs", album_id, pdf_path.name, elapsed)
-        return _pdf_result(pdf_path, album_id, cached=False, elapsed=elapsed)
+        return _pdf_result(
+            pdf_path,
+            album_id,
+            cached=False,
+            elapsed=elapsed,
+            compress_outcome=compressed,
+        )
     finally:
         _cleanup_leftover(download_dir, album_id)
         gc.collect()

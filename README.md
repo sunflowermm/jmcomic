@@ -25,3 +25,16 @@ uv pip install -r apis/jmcomic/requirements.txt
 
 - `POST /api/jmcomic/download` — body: `{"album_id":"123456"}`
 - `GET /api/jmcomic/file?path=data/jmcomic/pdf/...`
+- `POST /api/jmcomic/command` — `{"cmd":"status"}` / `{"cmd":"update"}` / `{"cmd":"sync"}`
+
+## 终端 / QQ 更新
+
+子服务交互终端：
+
+```text
+sub> jmcomic status
+sub> jmcomic update
+sub> jmcomic sync
+```
+
+主服务 QQ / stdin：`#子服 jmcomic update`

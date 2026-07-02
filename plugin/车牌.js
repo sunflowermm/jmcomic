@@ -1,6 +1,8 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { parse as parseYaml } from 'yaml'
+import { buildSubserverFileLink } from '#utils/subserver-file-proxy.js'
+import { formatSubserverError, getSubserverConfig } from '#utils/subserver-client.js'
 import { normalizeError } from '#utils/normalize-error.js'
 
 const RECALL_DELAY_MS = 120_000
@@ -8,6 +10,8 @@ const DOWNLOAD_TIMEOUT_MS = 600_000
 const DEFAULT_CACHE_MAX_FILES = 30
 
 export class ChepaiPlugin extends plugin {
+  _recallTimers = new Set()
+
   constructor() {
     super({
       name: '车牌插件',
@@ -16,7 +20,6 @@ export class ChepaiPlugin extends plugin {
       priority: 5000,
       rule: [{ reg: '^#车牌\\s*(.+)$', fnc: 'downloadPdf' }]
     })
-    this._recallTimers = new Set()
   }
 
   async downloadPdf() {
@@ -35,17 +38,13 @@ export class ChepaiPlugin extends plugin {
       })
 
       if (!result?.ok || !result.pdf_path) {
-        await this.reply(result?.error || '处理失败，请检查本子 ID 或子服务端日志')
+        const reason = result?.error || result?.reason || '处理失败'
+        const detail = result?.detail ? `\n（${result.detail}）` : ''
+        await this.reply(`${reason}${detail}`)
         return false
       }
 
       const fileName = result.pdf_name || path.basename(result.pdf_path)
-      if (!this._pdfMatchesAlbum(fileName, albumId)) {
-        logger.error(`[车牌] 子服务返回了错误 PDF album=${albumId} file=${fileName}`)
-        await this.reply(`PDF 与本子 ID 不匹配（请求 ${albumId}，得到 ${fileName}），请重试或删除 data/jmcomic/pdf 后重新下载`)
-        return false
-      }
-
       const pdfPath = await this._resolvePdfPath(result, albumId)
       if (result.cached) {
         logger.info(`[车牌] 子服务命中已有 PDF album=${albumId}`)
@@ -63,9 +62,9 @@ export class ChepaiPlugin extends plugin {
       }
       return true
     } catch (err) {
-      const error = normalizeError(err)
-      logger.error(`[车牌] 失败: ${error.message}`)
-      await this.reply('处理失败，请确认 JM 子服务插件已部署且依赖已安装')
+      const hint = formatSubserverError(err, getSubserverConfig())
+      logger.error(`[车牌] 失败: ${hint}`)
+      await this.reply(hint)
       return false
     }
   }
@@ -89,10 +88,6 @@ export class ChepaiPlugin extends plugin {
       }
     } catch { /* 需从子服务拉取 */ }
 
-    if (typeof Bot.fetchSubserverToPath !== 'function') {
-      throw new Error('Bot.fetchSubserverToPath 未挂载，请更新主服务')
-    }
-
     await Bot.fetchSubserverToPath('/api/jmcomic/file', {
       query: { path: result.pdf_path },
       dest: cachePath,
@@ -103,7 +98,7 @@ export class ChepaiPlugin extends plugin {
   }
 
   async _pruneLocalCache(keepAlbumId) {
-    const maxFiles = await this._readCacheMaxFiles()
+    const { cacheMaxFiles } = await this._readJmConfig()
     const cacheDir = path.join(process.cwd(), 'data/jmcomic/cache')
     try {
       const entries = await fs.readdir(cacheDir)
@@ -114,13 +109,13 @@ export class ChepaiPlugin extends plugin {
         const stat = await fs.stat(full)
         files.push({ full, name, mtime: stat.mtimeMs })
       }
-      if (files.length <= maxFiles) return
+      if (files.length <= cacheMaxFiles) return
 
       files.sort((a, b) => a.mtime - b.mtime)
       const keepName = `${keepAlbumId}.pdf`
       let removed = 0
       for (const item of files) {
-        if (files.length - removed <= maxFiles) break
+        if (files.length - removed <= cacheMaxFiles) break
         if (item.name === keepName) continue
         await fs.unlink(item.full).catch(() => {})
         removed += 1
@@ -133,16 +128,18 @@ export class ChepaiPlugin extends plugin {
     }
   }
 
-  async _readCacheMaxFiles() {
+  async _readJmConfig() {
     try {
       const file = path.join(process.cwd(), 'data/jmcomic/config.yaml')
       const text = await fs.readFile(file, 'utf8')
       const data = parseYaml(text) || {}
       const raw = data.qq?.cache_max_files ?? data.cache_max_files
       const n = Number(raw)
-      return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_CACHE_MAX_FILES
+      const cacheMaxFiles = Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_CACHE_MAX_FILES
+      const publicBaseUrl = String(data.public_base_url || data.qq?.public_base_url || '').trim()
+      return { cacheMaxFiles, publicBaseUrl }
     } catch {
-      return DEFAULT_CACHE_MAX_FILES
+      return { cacheMaxFiles: DEFAULT_CACHE_MAX_FILES, publicBaseUrl: '' }
     }
   }
 
@@ -180,30 +177,9 @@ export class ChepaiPlugin extends plugin {
   }
 
   async _buildDirectLinkUrl(result) {
-    const override = await this._readJmPublicBaseUrl()
-    const base = await Bot.getPublicServerUrl(override)
-    if (!base) return ''
-    const params = new URLSearchParams({ path: result.pdf_path })
-    return `${base}/subserver-file?${params}`
-  }
-
-  async _readJmPublicBaseUrl() {
-    try {
-      const file = path.join(process.cwd(), 'data/jmcomic/config.yaml')
-      const text = await fs.readFile(file, 'utf8')
-      const data = parseYaml(text) || {}
-      return String(data.public_base_url || data.qq?.public_base_url || '').trim()
-    } catch {
-      return ''
-    }
-  }
-
-  _pdfMatchesAlbum(fileName, albumId) {
-    const base = path.basename(fileName)
-    const stem = base.replace(/\.pdf$/i, '')
-    const prefix = `[JM${albumId}]`
-    return base === `${albumId}.pdf` || stem === albumId
-      || stem.startsWith(prefix) || base.startsWith(prefix)
+    const { publicBaseUrl } = await this._readJmConfig()
+    const base = await Bot.getPublicServerUrl(publicBaseUrl)
+    return buildSubserverFileLink(base, result.pdf_path)
   }
 
   _extractMsgIds(msgRes) {
@@ -227,7 +203,6 @@ export class ChepaiPlugin extends plugin {
     }
   }
 
-  /** 插件卸载时清理挂起的撤回定时器 */
   destroy() {
     for (const timer of this._recallTimers) {
       clearTimeout(timer)
@@ -235,3 +210,5 @@ export class ChepaiPlugin extends plugin {
     this._recallTimers.clear()
   }
 }
+
+export default ChepaiPlugin

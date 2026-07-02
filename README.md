@@ -1,6 +1,8 @@
 # jmcomic 子服务插件
 
-禁漫本子下载、PDF 导出与压缩；QQ 指令 `#车牌` 见 `plugin/车牌.js`。
+禁漫本子下载、PDF 导出与压缩；QQ 指令 `#车牌` 见 `plugin/车牌.js`（启动时同步至 `core/jm-Core/plugin/`）。
+
+Python 入口为单文件 `service.py`（routes + commands + init/shutdown，符合 CONTRACT）。
 
 ## 依赖
 
@@ -16,6 +18,7 @@ uv pip install -r apis/jmcomic/requirements.txt
 | 段 | 说明 |
 |---|---|
 | `client.impl` / `client.proxy` | jmcomic 客户端 |
+| `limits.*` | 本子大小预检与超时（超限返回原因，不强行下载） |
 | `pdf_compress.*` | 下载后 JPEG 重编码与限宽 |
 | `deploy.*` | 启动时同步 `plugin/` → `core/jm-Core/plugin/` |
 
@@ -32,9 +35,7 @@ uv pip install -r apis/jmcomic/requirements.txt
 子服务交互终端：
 
 ```text
-sub> jmcomic status
-sub> jmcomic update
-sub> jmcomic sync
+子服> jmcomic 状态
+子服> jmcomic 更新
+子服> jmcomic 同步
 ```
-
-主服务 QQ / stdin：`#子服 jmcomic update`

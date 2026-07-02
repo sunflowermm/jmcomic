@@ -1,4 +1,4 @@
-"""JMComic 下载与 PDF 导出 API（独立子服务插件，配置见本目录 default_config.yaml）。"""
+"""JMComic 子服务插件：下载/PDF/命令/更新（配置见 default_config.yaml）。"""
 
 from __future__ import annotations
 
@@ -10,43 +10,63 @@ import re
 import shutil
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
-
-import importlib.util
-import sys
 
 from fastapi import HTTPException, Request
 from fastapi.responses import FileResponse
 
-_config_spec = importlib.util.spec_from_file_location(
-    "jmcomic_plugin.config_loader",
-    Path(__file__).resolve().parent / "_config_loader.py",
-)
-_config_mod = importlib.util.module_from_spec(_config_spec)
-if _config_spec.name:
-    sys.modules[_config_spec.name] = _config_mod
-_config_spec.loader.exec_module(_config_mod)
-get_config = _config_mod.get_config
-_repo_root = _config_mod._repo_root
+from core.plugin_kit import default_plugin_update, load_plugin_config
 
-_compress_spec = importlib.util.spec_from_file_location(
-    "jmcomic_plugin.pdf_compress",
-    Path(__file__).resolve().parent / "_pdf_compress.py",
-)
-_compress_mod = importlib.util.module_from_spec(_compress_spec)
-if _compress_spec.name:
-    sys.modules[_compress_spec.name] = _compress_mod
-_compress_spec.loader.exec_module(_compress_mod)
-maybe_optimize_pdf = _compress_mod.maybe_optimize_pdf
+from ._deploy_sync import sync_qq_plugins
+from ._pdf_compress import maybe_optimize_pdf
 
 logger = logging.getLogger(__name__)
-config = get_config()
+
+_PLUGIN_DIR = Path(__file__).resolve().parent
+config = load_plugin_config(
+    _PLUGIN_DIR,
+    "jmcomic",
+    builtin={
+        "download_dir": "data/jmcomic/download",
+        "pdf_dir": "data/jmcomic/pdf",
+        "delete_original": True,
+        "reuse_existing_pdf": True,
+        "max_concurrent_downloads": 1,
+        "limits": {
+            "preflight": True,
+            "max_pages": 500,
+            "max_episodes": 80,
+            "max_pdf_mb": 80,
+            "download_timeout_sec": 1800,
+            "pages_per_episode_estimate": 12,
+        },
+        "pdf_compress": {
+            "enabled": True,
+            "jpeg_quality": 84,
+            "max_image_width": 1800,
+            "min_bytes": 262144,
+            "min_savings_ratio": 0.05,
+            "optimize_cached": True,
+        },
+        "client": {"impl": "api", "proxy": ""},
+        "public_base_url": "",
+        "qq": {"cache_max_files": 30},
+        "deploy": {
+            "sync_qq_plugin_on_startup": True,
+            "target_core": "jm-Core",
+        },
+    },
+)
 
 _ALBUM_ID_RE = re.compile(r"^\d+$")
 _PDF_INDEX: Dict[str, Tuple[float, str]] = {}
 _download_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
 _download_semaphore: Optional[asyncio.Semaphore] = None
+
+
+def _repo_root() -> Path:
+    return config.repo_root
 
 
 def _max_concurrent() -> int:
@@ -75,7 +95,6 @@ def _log_memory(tag: str) -> None:
         import resource
 
         usage = resource.getrusage(resource.RUSAGE_SELF)
-        # Linux: KB；macOS: bytes
         rss = usage.ru_maxrss
         rss_mb = rss / 1024 if rss > 10_000_000 else rss / 1024
         logger.debug("[jmcomic] %s RSS≈%.1fMB", tag, rss_mb)
@@ -100,7 +119,6 @@ def _storage_dirs() -> tuple[Path, Path]:
 
 
 def _pdf_belongs_to_album(path: Path, album_id: str) -> bool:
-    """按文件名判断 PDF 是否属于指定本子（禁止 glob 的 [] 字符类误匹配）。"""
     name = path.name
     stem = path.stem
     jm_prefix = f"[JM{album_id}]"
@@ -163,6 +181,18 @@ def _to_relative(path: Path) -> str:
         return str(path.resolve())
 
 
+def _reject(album_id: str, reason: str, *, detail: str = "") -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "ok": False,
+        "album_id": album_id,
+        "error": reason,
+        "reason": reason,
+    }
+    if detail:
+        payload["detail"] = detail
+    return payload
+
+
 def _pdf_result(
     pdf_path: Path,
     album_id: str,
@@ -211,8 +241,73 @@ def _build_option(download_dir: Path):
     return option
 
 
+def _estimate_page_count(album) -> int:
+    page_count = int(getattr(album, "page_count", 0) or 0)
+    if page_count > 0:
+        return page_count
+
+    episodes = album.episode_list or []
+    if not episodes:
+        return 0
+
+    per_episode = max(1, int(config.get("limits.pages_per_episode_estimate", 12) or 12))
+    return len(episodes) * per_episode
+
+
+def _preflight_check(album_id: str, option) -> Optional[str]:
+    if not config.get("limits.preflight", True):
+        return None
+
+    max_pages = int(config.get("limits.max_pages", 500) or 0)
+    max_episodes = int(config.get("limits.max_episodes", 80) or 0)
+
+    client = option.new_jm_client()
+    try:
+        album = client.get_album_detail(album_id)
+    except Exception as exc:
+        return f"无法获取本子信息，请检查 ID 或网络/代理配置: {exc}"
+
+    episodes = len(album.episode_list or [])
+    if max_episodes > 0 and episodes > max_episodes:
+        return (
+            f"章节数 {episodes} 超过上限 {max_episodes}，本子过大无法解析"
+            f"（可在 data/jmcomic/config.yaml 调整 limits.max_episodes）"
+        )
+
+    estimated_pages = _estimate_page_count(album)
+    if max_pages > 0 and estimated_pages > max_pages:
+        title = getattr(album, "name", "") or album_id
+        return (
+            f"《{title}》预估页数约 {estimated_pages}，超过上限 {max_pages}，本子过大无法解析"
+            f"（可在 data/jmcomic/config.yaml 调整 limits.max_pages）"
+        )
+
+    return None
+
+
+def _check_pdf_size_limit(pdf_path: Path, album_id: str) -> Optional[Dict[str, Any]]:
+    max_pdf_mb = float(config.get("limits.max_pdf_mb", 80) or 0)
+    if max_pdf_mb <= 0:
+        return None
+
+    size_bytes = pdf_path.stat().st_size
+    size_mb = size_bytes / (1024 * 1024)
+    if size_mb <= max_pdf_mb:
+        return None
+
+    try:
+        pdf_path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("删除超限 PDF 失败 %s: %s", pdf_path, exc)
+
+    return _reject(
+        album_id,
+        f"PDF 体积 {size_mb:.1f}MB 超过上限 {max_pdf_mb}MB，无法交付",
+        detail="limits.max_pdf_mb",
+    )
+
+
 def _cleanup_leftover(download_dir: Path, album_id: str) -> None:
-    """下载/转 PDF 后清理残留原图目录，避免磁盘与库内缓存长期堆积。"""
     if not download_dir.exists():
         return
     markers = (album_id, f"[JM{album_id}]")
@@ -239,6 +334,9 @@ def _download_sync(album_id: str) -> Dict[str, Any]:
             existing = _find_pdf(pdf_dir, album_id)
             if existing:
                 logger.info("本子 %s 命中已有 PDF，跳过下载: %s", album_id, existing.name)
+                size_error = _check_pdf_size_limit(existing, album_id)
+                if size_error:
+                    return size_error
                 compressed = _optimize_pdf_output(existing, cached=True)
                 return _pdf_result(
                     existing,
@@ -250,6 +348,11 @@ def _download_sync(album_id: str) -> Dict[str, Any]:
         from jmcomic import Feature, download_album
 
         option = _build_option(download_dir)
+        reject_reason = _preflight_check(album_id, option)
+        if reject_reason:
+            logger.info("本子 %s 预检拒绝: %s", album_id, reject_reason)
+            return _reject(album_id, reject_reason)
+
         delete_original = bool(config.get("delete_original", True))
         started = time.time()
         logger.info("本子 %s 开始下载", album_id)
@@ -266,7 +369,11 @@ def _download_sync(album_id: str) -> Dict[str, Any]:
 
         pdf_path = _find_pdf(pdf_dir, album_id)
         if not pdf_path:
-            raise RuntimeError("PDF 生成失败，未在输出目录找到文件")
+            return _reject(album_id, "PDF 生成失败，未在输出目录找到文件")
+
+        size_error = _check_pdf_size_limit(pdf_path, album_id)
+        if size_error:
+            return size_error
 
         compressed = _optimize_pdf_output(pdf_path, cached=False)
         elapsed = round(time.time() - started, 2)
@@ -278,6 +385,12 @@ def _download_sync(album_id: str) -> Dict[str, Any]:
             elapsed=elapsed,
             compress_outcome=compressed,
         )
+    except MemoryError:
+        logger.error("本子 %s 下载内存不足", album_id, exc_info=True)
+        return _reject(album_id, "内存不足，本子过大无法解析，请调低 limits 或增大子服务内存")
+    except Exception as exc:
+        logger.error("本子 %s 下载异常: %s", album_id, exc, exc_info=True)
+        return _reject(album_id, f"下载失败: {exc}")
     finally:
         _cleanup_leftover(download_dir, album_id)
         gc.collect()
@@ -294,16 +407,27 @@ async def download_handler(request: Request):
     if not _ALBUM_ID_RE.fullmatch(album_id):
         raise HTTPException(status_code=400, detail="album_id 必须为纯数字")
 
+    timeout_sec = int(config.get("limits.download_timeout_sec", 1800) or 1800)
     semaphore, executor = _ensure_download_pool()
     try:
         async with semaphore:
             loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(executor, _download_sync, album_id)
+            future = loop.run_in_executor(executor, _download_sync, album_id)
+            if timeout_sec > 0:
+                return await asyncio.wait_for(future, timeout=timeout_sec)
+            return await future
+    except asyncio.TimeoutError:
+        logger.error("本子 %s 下载超时（>%ds）", album_id, timeout_sec)
+        return _reject(
+            album_id,
+            f"下载超时（>{timeout_sec}秒），本子可能过大或网络过慢",
+            detail="limits.download_timeout_sec",
+        )
     except HTTPException:
         raise
     except Exception as exc:
         logger.error("JMComic 下载失败 album=%s: %s", album_id, exc, exc_info=True)
-        return {"ok": False, "album_id": album_id, "error": str(exc)}
+        return _reject(album_id, str(exc))
 
 
 def _safe_pdf_path(raw: str) -> Path:
@@ -336,16 +460,45 @@ async def file_handler(request: Request):
     )
 
 
-async def startup_init(_app):
-    sync_spec = importlib.util.spec_from_file_location(
-        "jmcomic_plugin.deploy_sync",
-        Path(__file__).resolve().parent / "_deploy_sync.py",
+async def cmd_status(_request, _args: List[str]):
+    return {
+        "service": "jmcomic",
+        "config": str(config.runtime_file),
+        "download_dir": config.get("download_dir", "data/jmcomic/download"),
+        "pdf_dir": config.get("pdf_dir", "data/jmcomic/pdf"),
+        "max_concurrent": config.get("max_concurrent_downloads", 1),
+        "limits": {
+            "max_pages": config.get("limits.max_pages"),
+            "max_episodes": config.get("limits.max_episodes"),
+            "max_pdf_mb": config.get("limits.max_pdf_mb"),
+            "download_timeout_sec": config.get("limits.download_timeout_sec"),
+        },
+    }
+
+
+async def cmd_sync(_request, _args: List[str]):
+    updated = sync_qq_plugins(
+        _repo_root(),
+        target_core=config.get("deploy.target_core", "jm-Core"),
+        enabled=bool(config.get("deploy.sync_qq_plugin_on_startup", True)),
     )
-    sync_mod = importlib.util.module_from_spec(sync_spec)
-    if sync_spec.name:
-        sys.modules[sync_spec.name] = sync_mod
-    sync_spec.loader.exec_module(sync_mod)
-    sync_mod.sync_qq_plugins(
+    return {"synced": updated, "count": len(updated)}
+
+
+async def jmcomic_update(_request, args: List[str]):
+    base = await default_plugin_update(
+        _PLUGIN_DIR,
+        pip=True,
+        git=(_PLUGIN_DIR / ".git").exists(),
+    )
+    sync = await cmd_sync(_request, args)
+    base["sync"] = sync
+    base["ok"] = bool(base.get("ok", True))
+    return base
+
+
+async def startup_init(_app):
+    sync_qq_plugins(
         _repo_root(),
         target_core=config.get("deploy.target_core", "jm-Core"),
         enabled=bool(config.get("deploy.sync_qq_plugin_on_startup", True)),
@@ -365,11 +518,15 @@ async def shutdown_cleanup(_app):
 
 
 default = {
-    "name": "jmcomic-download",
+    "name": "jmcomic",
     "description": "禁漫本子下载并导出 PDF",
+    "group": "jmcomic",
+    "plugin_dir": str(_PLUGIN_DIR),
     "priority": 200,
     "init": startup_init,
     "shutdown": shutdown_cleanup,
+    "commands": {"status": cmd_status, "sync": cmd_sync},
+    "on_update": jmcomic_update,
     "routes": [
         {"method": "POST", "path": "/api/jmcomic/download", "handler": download_handler},
         {"method": "GET", "path": "/api/jmcomic/file", "handler": file_handler},

@@ -7,6 +7,15 @@ delete_original: true
 reuse_existing_pdf: true   # data/jmcomic/pdf 已有则直接返回，不重新下载
 max_concurrent_downloads: 1  # 同时仅 1 个下载任务，避免多本并行撑爆内存（4G 机器建议保持 1）
 
+# 本子大小限制（超限直接返回原因，不强行下载，避免 OOM 崩溃）
+limits:
+  preflight: true                 # 下载前拉取本子元数据预检
+  max_pages: 500                  # 预估总页数上限（API 无页数时用 章节数×pages_per_episode_estimate）
+  max_episodes: 80                # 章节数上限
+  max_pdf_mb: 80                  # 生成 PDF 体积上限（MB），超限删除并拒绝
+  download_timeout_sec: 1800      # 单次下载最长等待（秒）
+  pages_per_episode_estimate: 12  # API 不返 page_count 时的页数粗估系数
+
 # PDF 体积优化（下载完成后自动压缩，典型可缩小 5～10 倍）
 pdf_compress:
   enabled: true

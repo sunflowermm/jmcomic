@@ -302,7 +302,7 @@ def _check_pdf_size_limit(pdf_path: Path, album_id: str) -> Optional[Dict[str, A
 
     return _reject(
         album_id,
-        f"PDF 体积 {size_mb:.1f}MB 超过上限 {max_pdf_mb}MB，无法交付",
+        f"PDF 压缩后体积 {size_mb:.1f}MB 仍超过上限 {max_pdf_mb}MB，无法交付",
         detail="limits.max_pdf_mb",
     )
 
@@ -334,10 +334,10 @@ def _download_sync(album_id: str) -> Dict[str, Any]:
             existing = _find_pdf(pdf_dir, album_id)
             if existing:
                 logger.info("本子 %s 命中已有 PDF，跳过下载: %s", album_id, existing.name)
+                compressed = _optimize_pdf_output(existing, cached=True)
                 size_error = _check_pdf_size_limit(existing, album_id)
                 if size_error:
                     return size_error
-                compressed = _optimize_pdf_output(existing, cached=True)
                 return _pdf_result(
                     existing,
                     album_id,
@@ -371,11 +371,11 @@ def _download_sync(album_id: str) -> Dict[str, Any]:
         if not pdf_path:
             return _reject(album_id, "PDF 生成失败，未在输出目录找到文件")
 
+        compressed = _optimize_pdf_output(pdf_path, cached=False)
         size_error = _check_pdf_size_limit(pdf_path, album_id)
         if size_error:
             return size_error
 
-        compressed = _optimize_pdf_output(pdf_path, cached=False)
         elapsed = round(time.time() - started, 2)
         logger.info("本子 %s 下载完成，PDF=%s，耗时 %.2fs", album_id, pdf_path.name, elapsed)
         return _pdf_result(

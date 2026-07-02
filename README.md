@@ -1,41 +1,39 @@
 # jmcomic 子服务插件
 
-禁漫本子下载、PDF 导出与压缩；QQ 指令 `#车牌` 见 `plugin/车牌.js`（启动时同步至 `core/jm-Core/plugin/`）。
+禁漫本子下载、PDF 导出与压缩；QQ `#车牌` 在 `core/plugin/`。
 
-Python 入口为单文件 `service.py`（routes + commands + init/shutdown，符合 CONTRACT）。
+## 标准目录（子服业务插件 + CommonConfig）
 
-## 依赖
-
-```bash
-cd subserver/pyserver
-uv pip install -r apis/jmcomic/requirements.txt
 ```
+apis/jmcomic/
+  service.py              # 业务入口；default 含 plugin_config
+  default_config.yaml     # 默认值 → data/jmcomic/config.yaml
+  config_schema.yaml      # 控制台 schema（非主服 commonconfig/*.js）
+  requirements.txt
+  core/plugin/车牌.js     # 主服 QQ 插件
+  _download_compress.py
+  _pdf_compress.py
+```
+
+**CommonConfig 不在主服写 JS 插件**。主服 `ConfigLoader.registerFromSubserver()` 拉取 schema，注册 `SubserverConfigProxy`（控制台「禁漫本子」）。
 
 ## 配置
 
-运行时：`data/jmcomic/config.yaml`（首次从 `default_config.yaml` 复制）。
-
-| 段 | 说明 |
-|---|---|
-| `client.impl` / `client.proxy` | jmcomic 客户端 |
-| `limits.*` | 本子大小预检与超时（超限返回原因，不强行下载） |
-| `pdf_compress.*` | 拉取时压图（`compress_at_download`）+ 超限 PDF 级 fallback |
-| `deploy.*` | 启动时同步 `plugin/` → `core/jm-Core/plugin/` |
-
-主服务连子服务：`data/server_bots/{port}/aistream.yaml` → `subserver.host` / `port`。
+| 项 | 路径 |
+|----|------|
+| 运行时 | `data/jmcomic/config.yaml` |
+| 控制台 | 主服 CommonConfig「禁漫本子」 |
+| 子服端点 | AIStream → 子服务端（`cfg.subserver`） |
 
 ## API
 
-- `POST /api/jmcomic/download` — body: `{"album_id":"123456"}`
-- `GET /api/jmcomic/file?path=data/jmcomic/pdf/...`
-- `POST /api/jmcomic/command` — `{"cmd":"status"}` / `{"cmd":"update"}` / `{"cmd":"sync"}`
+- `POST /api/jmcomic/download`
+- `GET /api/jmcomic/file?path=...`
+- `GET/POST /api/jmcomic/config/*`（声明 `plugin_config` 后自动挂载）
 
-## 终端 / QQ 更新
-
-子服务交互终端：
+## 终端
 
 ```text
 子服> jmcomic 状态
 子服> jmcomic 更新
-子服> jmcomic 同步
 ```

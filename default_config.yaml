@@ -1,39 +1,50 @@
-# 首次加载复制到 data/jmcomic/config.yaml；运行时只改 data 里那份即可
+# =============================================================================
+# jmcomic 子服插件配置模板
+# =============================================================================
+# 首次启动时复制到：data/jmcomic/config.yaml
+# 运行时只改 data 里那份；改本模板仅影响「尚未生成 runtime 配置」的新环境。
+# 主服控制台「禁漫本子」经 SubserverConfigProxy 读写本文件（schema 在 config_schema.yaml）。
+# =============================================================================
 
-download_dir: data/jmcomic/download
-pdf_dir: data/jmcomic/pdf
-delete_original: true
-reuse_existing_pdf: true
-max_concurrent_downloads: 1
+# --- 存储路径（相对仓库根目录）---
+download_dir: data/jmcomic/download   # 拉取过程中的临时图片目录（合成 PDF 后会清理）
+pdf_dir: data/jmcomic/pdf             # 最终 PDF 存放目录；二次请求直接读此目录
 
+# --- 生命周期 ---
+delete_original: true       # 合成 PDF 后删除 download_dir 内对应原图/章节目录
+reuse_existing_pdf: true    # true=命中 pdf_dir 已有文件则跳过下载，直接交付
+
+# --- 并发 ---
+max_concurrent_downloads: 1   # 同时下载的本子数（建议 1，大本子占内存）
+
+# --- 本子体量预检与交付上限 ---
 limits:
-  preflight: true
-  max_pages: 300
-  max_episodes: 50
-  max_pdf_mb: 50
-  download_timeout_sec: 900
-  pages_per_episode_estimate: 10
+  preflight: true                 # 下载前向禁漫 API 查询章节/页数，超限直接拒绝
+  max_pages: 300                  # 预估总页数上限（含 pages_per_episode_estimate 估算）
+  max_episodes: 50                # 章节数上限
+  max_pdf_mb: 50                  # 压缩后 PDF 仍超过此值则拒绝交付（MB；0=不限制）
+  download_timeout_sec: 900       # 单次下载 HTTP 超时（秒）
+  pages_per_episode_estimate: 10  # API 未返回总页数时，每章预估页数
 
+# --- 图片/PDF 压缩（拉取时压图 + 必要时 PDF 级 fallback）---
 pdf_compress:
   enabled: true
-  compress_at_download: true  # 拉取时每张图立刻降质，PDF 直接由小图合成
-  jpeg_quality: 62            # 越低体积越小（建议 55–70，漫画可读）
-  max_image_width: 1080       # 长边上限 px，超则缩放
-  min_bytes: 262144
-  min_savings_ratio: 0        # PDF 级 fallback 时：0=只要有缩小就替换
-  optimize_cached: false      # 命中本地 PDF 不再重压，直接发送
-  fallback_jpeg_quality: 52   # 仍超 limits.max_pdf_mb 时 PDF 级强压
-  fallback_max_image_width: 900
+  compress_at_download: true   # true=每张图下载完立刻 JPEG 降质/限宽，再合成 PDF（推荐）
+  jpeg_quality: 62             # JPEG 质量 45–92；越低体积越小（漫画建议 55–70）
+  max_image_width: 1080        # 图片长边像素上限，超出则等比缩小（0=仅重编码不缩放）
+  min_bytes: 262144            # PDF 级 fallback 时：小于 256KB 的 PDF 跳过整本重压
+  min_savings_ratio: 0         # PDF 级 fallback：0=只要有体积缩小就接受
+  optimize_cached: false       # false=本地已有 PDF 不再重压，二次请求零压缩开销
+  fallback_jpeg_quality: 52    # 压缩后仍超 max_pdf_mb 时，PDF 级二次强压质量
+  fallback_max_image_width: 900  # PDF 级二次强压时的长边上限
 
+# --- jmcomic 客户端（访问禁漫站）---
 client:
-  impl: api
-  proxy: ""
+  impl: api       # api | mobile 等，见 jmcomic 文档
+  proxy: ""       # HTTP 代理，例 http://127.0.0.1:7890；直连留空
 
-public_base_url: ""
+# --- 主服 QQ 直链（可选，亦可在 CommonConfig 编辑）---
+public_base_url: ""   # 公网访问前缀；留空则用 server.yaml 的 server.url
 
 qq:
-  cache_max_files: 15
-
-deploy:
-  sync_qq_plugin_on_startup: true
-  target_core: jm-Core
+  cache_max_files: 15   # 主服从子服拉取 PDF 后在 data/jmcomic/cache 保留份数

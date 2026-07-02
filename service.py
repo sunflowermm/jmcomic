@@ -18,59 +18,18 @@ from fastapi.responses import FileResponse
 
 from core.plugin_kit import default_plugin_update, load_plugin_config
 
-from ._deploy_sync import sync_qq_plugins
 from ._download_compress import attach_download_compress
 from ._pdf_compress import CompressOutcome, mark_pdf_ready, maybe_optimize_pdf
 
 logger = logging.getLogger(__name__)
 
 _PLUGIN_DIR = Path(__file__).resolve().parent
-config = load_plugin_config(
-    _PLUGIN_DIR,
-    "jmcomic",
-    builtin={
-        "download_dir": "data/jmcomic/download",
-        "pdf_dir": "data/jmcomic/pdf",
-        "delete_original": True,
-        "reuse_existing_pdf": True,
-        "max_concurrent_downloads": 1,
-        "limits": {
-            "preflight": True,
-            "max_pages": 500,
-            "max_episodes": 80,
-            "max_pdf_mb": 80,
-            "download_timeout_sec": 1800,
-            "pages_per_episode_estimate": 12,
-        },
-        "pdf_compress": {
-            "enabled": True,
-            "compress_at_download": True,
-            "jpeg_quality": 62,
-            "max_image_width": 1080,
-            "min_bytes": 262144,
-            "min_savings_ratio": 0,
-            "optimize_cached": False,
-            "fallback_jpeg_quality": 52,
-            "fallback_max_image_width": 900,
-        },
-        "client": {"impl": "api", "proxy": ""},
-        "public_base_url": "",
-        "qq": {"cache_max_files": 30},
-        "deploy": {
-            "sync_qq_plugin_on_startup": True,
-            "target_core": "jm-Core",
-        },
-    },
-)
+config = load_plugin_config(_PLUGIN_DIR, "jmcomic")
 
 _ALBUM_ID_RE = re.compile(r"^\d+$")
 _PDF_INDEX: Dict[str, Tuple[float, str]] = {}
 _download_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
 _download_semaphore: Optional[asyncio.Semaphore] = None
-
-
-def _repo_root() -> Path:
-    return config.repo_root
 
 
 def _max_concurrent() -> int:
@@ -110,13 +69,13 @@ def _resolve_dir(key: str, fallback: Path) -> Path:
     raw = config.get(key, "")
     path = Path(raw) if raw else fallback
     if not path.is_absolute():
-        path = _repo_root() / path
+        path = config.repo_root / path
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
 def _storage_dirs() -> tuple[Path, Path]:
-    base = _repo_root() / "data" / "jmcomic"
+    base = config.repo_root / "data" / "jmcomic"
     download_dir = _resolve_dir("download_dir", base / "download")
     pdf_dir = _resolve_dir("pdf_dir", base / "pdf")
     return download_dir, pdf_dir
@@ -180,7 +139,7 @@ def _extract_title(pdf_path: Path, album_id: str) -> str:
 
 def _to_relative(path: Path) -> str:
     try:
-        return path.resolve().relative_to(_repo_root().resolve()).as_posix()
+        return path.resolve().relative_to(config.repo_root.resolve()).as_posix()
     except ValueError:
         return str(path.resolve())
 
@@ -505,7 +464,7 @@ def _safe_pdf_path(raw: str) -> Path:
     _, pdf_dir = _storage_dirs()
     candidate = Path(raw)
     if not candidate.is_absolute():
-        candidate = _repo_root() / raw
+        candidate = config.repo_root / raw
 
     resolved = candidate.resolve()
     pdf_root = pdf_dir.resolve()
@@ -544,33 +503,15 @@ async def cmd_status(_request, _args: List[str]):
     }
 
 
-async def cmd_sync(_request, _args: List[str]):
-    updated = sync_qq_plugins(
-        _repo_root(),
-        target_core=config.get("deploy.target_core", "jm-Core"),
-        enabled=bool(config.get("deploy.sync_qq_plugin_on_startup", True)),
-    )
-    return {"synced": updated, "count": len(updated)}
-
-
-async def jmcomic_update(_request, args: List[str]):
-    base = await default_plugin_update(
+async def jmcomic_update(_request, _args: List[str]):
+    return await default_plugin_update(
         _PLUGIN_DIR,
         pip=True,
         git=(_PLUGIN_DIR / ".git").exists(),
     )
-    sync = await cmd_sync(_request, args)
-    base["sync"] = sync
-    base["ok"] = bool(base.get("ok", True))
-    return base
 
 
 async def startup_init(_app):
-    sync_qq_plugins(
-        _repo_root(),
-        target_core=config.get("deploy.target_core", "jm-Core"),
-        enabled=bool(config.get("deploy.sync_qq_plugin_on_startup", True)),
-    )
     logger.info("JMComic 下载并发上限: %d", _max_concurrent())
 
 
@@ -590,10 +531,11 @@ default = {
     "description": "禁漫本子下载并导出 PDF",
     "group": "jmcomic",
     "plugin_dir": str(_PLUGIN_DIR),
+    "plugin_config": config,
     "priority": 200,
     "init": startup_init,
     "shutdown": shutdown_cleanup,
-    "commands": {"status": cmd_status, "sync": cmd_sync},
+    "commands": {"status": cmd_status},
     "on_update": jmcomic_update,
     "routes": [
         {"method": "POST", "path": "/api/jmcomic/download", "handler": download_handler},

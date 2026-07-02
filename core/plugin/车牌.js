@@ -1,13 +1,13 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { parse as parseYaml } from 'yaml'
+import ConfigLoader from '#infrastructure/commonconfig/loader.js'
 import { buildSubserverFileLink } from '#utils/subserver-file-proxy.js'
 import { formatSubserverError, getSubserverConfig } from '#utils/subserver-client.js'
 import { normalizeError } from '#utils/normalize-error.js'
 
 const RECALL_DELAY_MS = 120_000
 const DOWNLOAD_TIMEOUT_MS = 600_000
-const DEFAULT_CACHE_MAX_FILES = 30
+const DEFAULT_CACHE_MAX_FILES = 15
 
 export class ChepaiPlugin extends plugin {
   _recallTimers = new Set()
@@ -129,18 +129,24 @@ export class ChepaiPlugin extends plugin {
   }
 
   async _readJmConfig() {
-    try {
-      const file = path.join(process.cwd(), 'data/jmcomic/config.yaml')
-      const text = await fs.readFile(file, 'utf8')
-      const data = parseYaml(text) || {}
-      const raw = data.qq?.cache_max_files ?? data.cache_max_files
-      const n = Number(raw)
-      const cacheMaxFiles = Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_CACHE_MAX_FILES
-      const publicBaseUrl = String(data.public_base_url || data.qq?.public_base_url || '').trim()
-      return { cacheMaxFiles, publicBaseUrl }
-    } catch {
-      return { cacheMaxFiles: DEFAULT_CACHE_MAX_FILES, publicBaseUrl: '' }
+    const entry = ConfigLoader.get('jmcomic')
+    if (entry?.read) {
+      try {
+        const data = await entry.read()
+        return this._pickQqFields(data)
+      } catch (err) {
+        logger.debug(`[车牌] 读取 jmcomic 配置失败: ${normalizeError(err).message}`)
+      }
     }
+    return { cacheMaxFiles: DEFAULT_CACHE_MAX_FILES, publicBaseUrl: '' }
+  }
+
+  _pickQqFields(data) {
+    const raw = data?.qq?.cache_max_files
+    const n = Number(raw)
+    const cacheMaxFiles = Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_CACHE_MAX_FILES
+    const publicBaseUrl = String(data?.public_base_url || '').trim()
+    return { cacheMaxFiles, publicBaseUrl }
   }
 
   async _deliverPdf(result, pdfPath, fileName, albumId) {
@@ -170,7 +176,7 @@ export class ChepaiPlugin extends plugin {
     }
 
     const fallback = await this.reply(
-      `PDF 已就绪（${sizeMb}MB），群文件发送失败且无法生成公网直链。请在 server.yaml 配置 server.url，或在 data/jmcomic/config.yaml 配置 public_base_url`
+      `PDF 已就绪（${sizeMb}MB），群文件发送失败且无法生成公网直链。请在 server.yaml 配置 server.url，或在控制台「禁漫本子」配置 public_base_url`
     )
     msgIds.push(...this._extractMsgIds(fallback))
     return { mode: 'failed', msgIds }

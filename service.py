@@ -531,7 +531,6 @@ default = {
     "description": "禁漫本子下载并导出 PDF",
     "group": "jmcomic",
     "plugin_dir": str(_PLUGIN_DIR),
-    "plugin_config": config,
     "priority": 200,
     "init": startup_init,
     "shutdown": shutdown_cleanup,

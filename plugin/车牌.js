@@ -41,7 +41,7 @@ export class ChepaiPlugin extends plugin {
         const reason = result?.error || result?.reason || '处理失败'
         const detail = result?.detail ? `\n（${result.detail}）` : ''
         await this.reply(`${reason}${detail}`)
-        return false
+        return true
       }
 
       const fileName = result.pdf_name || path.basename(result.pdf_path)
@@ -65,7 +65,7 @@ export class ChepaiPlugin extends plugin {
       const hint = formatSubserverError(err, getSubserverConfig())
       logger.error(`[车牌] 失败: ${hint}`)
       await this.reply(hint)
-      return false
+      return true
     }
   }
 
@@ -210,5 +210,3 @@ export class ChepaiPlugin extends plugin {
     this._recallTimers.clear()
   }
 }
-
-export default ChepaiPlugin

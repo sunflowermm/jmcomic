@@ -1,42 +1,36 @@
-# JM 子服务插件默认配置
-# 首次加载时复制到 data/jmcomic/config.yaml（勿写入 AGT 本体 config/default_config/）
+# 首次加载复制到 data/jmcomic/config.yaml；运行时只改 data 里那份即可
 
-download_dir: "data/jmcomic/download"
-pdf_dir: "data/jmcomic/pdf"
+download_dir: data/jmcomic/download
+pdf_dir: data/jmcomic/pdf
 delete_original: true
-reuse_existing_pdf: true   # data/jmcomic/pdf 已有则直接返回，不重新下载
-max_concurrent_downloads: 1  # 同时仅 1 个下载任务，避免多本并行撑爆内存（4G 机器建议保持 1）
+reuse_existing_pdf: true
+max_concurrent_downloads: 1
 
-# 本子大小限制（超限直接返回原因，不强行下载，避免 OOM 崩溃）
 limits:
-  preflight: true                 # 下载前拉取本子元数据预检
-  max_pages: 500                  # 预估总页数上限（API 无页数时用 章节数×pages_per_episode_estimate）
-  max_episodes: 80                # 章节数上限
-  max_pdf_mb: 80                  # 生成 PDF 体积上限（MB），超限删除并拒绝
-  download_timeout_sec: 1800      # 单次下载最长等待（秒）
-  pages_per_episode_estimate: 12  # API 不返 page_count 时的页数粗估系数
+  preflight: true
+  max_pages: 300
+  max_episodes: 50
+  max_pdf_mb: 50
+  download_timeout_sec: 900
+  pages_per_episode_estimate: 10
 
-# PDF 体积优化（下载完成后自动压缩，典型可缩小 5～10 倍）
 pdf_compress:
   enabled: true
-  jpeg_quality: 84           # 80～88：画质与体积平衡；越低越小
-  max_image_width: 1800      # 宽/高超此值等比缩小，0=不缩放
-  min_bytes: 262144          # 小于 256KB 不压缩
-  min_savings_ratio: 0.05    # 体积减少不足 5% 则保留原文件
-  optimize_cached: true      # 命中旧 PDF 缓存时仍尝试补压缩（无 .jmcompress 标记时）
+  jpeg_quality: 78
+  max_image_width: 1400
+  min_bytes: 262144
+  min_savings_ratio: 0.05
+  optimize_cached: false
 
 client:
-  impl: "api"    # api | mobile
-  proxy: ""      # 例 http://127.0.0.1:7890
+  impl: api
+  proxy: ""
 
-# 直链兜底时的公网根地址（可选，优先于 Bot 自动检测）
-# 例 https://bot.example.com 或 http://1.2.3.4:8086
 public_base_url: ""
 
 qq:
-  cache_max_files: 30   # 主服务 data/jmcomic/cache 最多保留份数，超出删最旧
+  cache_max_files: 15
 
-# 子服务每次启动时，将 plugin/*.js 与 core/<target_core>/plugin/ 对比，不一致则覆盖
 deploy:
   sync_qq_plugin_on_startup: true
-  target_core: "jm-Core"
+  target_core: jm-Core

@@ -14,7 +14,7 @@ from typing import Any, Dict, Optional, Protocol
 logger = logging.getLogger(__name__)
 
 MARKER_SUFFIX = ".jmcompress"
-MARKER_VERSION = 1
+MARKER_VERSION = 3
 
 
 class ConfigReader(Protocol):
@@ -31,19 +31,34 @@ class CompressOutcome:
     skipped_reason: str = ""
 
 
-def load_compress_settings(config: ConfigReader) -> Dict[str, Any]:
-    quality = int(config.get("pdf_compress.jpeg_quality", 84) or 84)
-    return {
+def load_compress_settings(
+    config: ConfigReader,
+    overrides: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    quality = int(config.get("pdf_compress.jpeg_quality", 62) or 62)
+    settings = {
         "enabled": bool(config.get("pdf_compress.enabled", True)),
-        "jpeg_quality": max(50, min(95, quality)),
-        "max_image_width": max(0, int(config.get("pdf_compress.max_image_width", 1800) or 0)),
+        "jpeg_quality": max(45, min(92, quality)),
+        "max_image_width": max(0, int(config.get("pdf_compress.max_image_width", 1080) or 0)),
         "min_bytes": max(0, int(config.get("pdf_compress.min_bytes", 262144) or 262144)),
         "min_savings_ratio": max(
             0.0,
-            min(0.95, float(config.get("pdf_compress.min_savings_ratio", 0.05) or 0.05)),
+            min(0.95, float(config.get("pdf_compress.min_savings_ratio", 0) or 0)),
         ),
         "optimize_cached": bool(config.get("pdf_compress.optimize_cached", True)),
     }
+    if overrides:
+        for key, value in overrides.items():
+            if key in settings and value is not None:
+                settings[key] = value
+        settings["jpeg_quality"] = max(45, min(92, int(settings["jpeg_quality"])))
+        settings["max_image_width"] = max(0, int(settings["max_image_width"]))
+        settings["min_bytes"] = max(0, int(settings["min_bytes"]))
+        settings["min_savings_ratio"] = max(
+            0.0,
+            min(0.95, float(settings["min_savings_ratio"])),
+        )
+    return settings
 
 
 def _marker_path(pdf_path: Path) -> Path:
@@ -75,7 +90,7 @@ def _write_marker(pdf_path: Path, original_size: int, final_size: int) -> None:
     )
 
 
-def _recompress_image(
+def compress_image_bytes(
     image_bytes: bytes,
     *,
     jpeg_quality: int,
@@ -109,8 +124,16 @@ def _recompress_image(
         img = img.convert("RGB")
 
     out = BytesIO()
-    img.save(out, format="JPEG", quality=jpeg_quality, optimize=True, progressive=True)
-    return out.getvalue()
+    img.save(
+        out,
+        format="JPEG",
+        quality=jpeg_quality,
+        optimize=True,
+        progressive=True,
+        subsampling=2,
+    )
+    data = out.getvalue()
+    return data if data else None
 
 
 def _compress_with_pymupdf(src: Path, dst: Path, settings: Dict[str, Any]) -> int:
@@ -130,12 +153,21 @@ def _compress_with_pymupdf(src: Path, dst: Path, settings: Dict[str, Any]) -> in
                     continue
 
                 original = extracted["image"]
-                recompressed = _recompress_image(
+                recompressed = compress_image_bytes(
                     original,
                     jpeg_quality=settings["jpeg_quality"],
                     max_width=settings["max_image_width"],
                 )
-                if not recompressed or len(recompressed) >= len(original):
+                if not recompressed:
+                    continue
+                orig_w = extracted.get("width") or 0
+                orig_h = extracted.get("height") or 0
+                max_side = max(orig_w, orig_h)
+                downscaled = (
+                    settings["max_image_width"] > 0
+                    and max_side > settings["max_image_width"]
+                )
+                if len(recompressed) >= len(original) and not downscaled:
                     continue
 
                 try:
@@ -147,6 +179,11 @@ def _compress_with_pymupdf(src: Path, dst: Path, settings: Dict[str, Any]) -> in
                         updated += 1
                     except Exception:
                         continue
+
+        try:
+            doc.scrub(thumbnails=True)
+        except Exception:
+            pass
 
         doc.save(
             str(dst),
@@ -166,9 +203,10 @@ def optimize_pdf(
     config: ConfigReader,
     *,
     force: bool = False,
+    overrides: Optional[Dict[str, Any]] = None,
 ) -> CompressOutcome:
     """压缩 PDF；已优化且 force=False 时跳过。"""
-    settings = load_compress_settings(config)
+    settings = load_compress_settings(config, overrides)
     original_size = pdf_path.stat().st_size
 
     if not settings["enabled"]:
@@ -196,7 +234,24 @@ def optimize_pdf(
         final_size = tmp_path.stat().st_size
         min_target = int(original_size * (1 - settings["min_savings_ratio"]))
 
-        if final_size >= min_target:
+        if final_size >= original_size:
+            logger.info(
+                "[jmcomic] PDF 压缩无收益 %s: %s → %s (images=%d)",
+                pdf_path.name,
+                _fmt_mb(original_size),
+                _fmt_mb(final_size),
+                updated,
+            )
+            return CompressOutcome(
+                pdf_path,
+                False,
+                original_size,
+                original_size,
+                1.0,
+                "no_reduction",
+            )
+
+        if final_size >= min_target and settings["min_savings_ratio"] > 0:
             logger.info(
                 "[jmcomic] PDF 压缩收益不足 %s: %s → %s (images=%d)",
                 pdf_path.name,
@@ -243,14 +298,22 @@ def optimize_pdf(
             tmp_path.unlink(missing_ok=True)
 
 
+def mark_pdf_ready(pdf_path: Path) -> None:
+    size = pdf_path.stat().st_size
+    if not _read_marker(pdf_path):
+        _write_marker(pdf_path, size, size)
+
+
 def maybe_optimize_pdf(
     pdf_path: Path,
     config: ConfigReader,
     *,
     cached: bool,
+    force: bool = False,
+    overrides: Optional[Dict[str, Any]] = None,
 ) -> CompressOutcome:
-    settings = load_compress_settings(config)
-    if cached and not settings["optimize_cached"]:
+    settings = load_compress_settings(config, overrides)
+    if cached and not settings["optimize_cached"] and not force:
         return CompressOutcome(
             pdf_path,
             False,
@@ -259,7 +322,7 @@ def maybe_optimize_pdf(
             1.0,
             "cached_skip",
         )
-    return optimize_pdf(pdf_path, config)
+    return optimize_pdf(pdf_path, config, force=force, overrides=overrides)
 
 
 def _fmt_mb(num_bytes: int) -> str:

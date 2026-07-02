@@ -19,7 +19,7 @@ uv pip install -r apis/jmcomic/requirements.txt
 |---|---|
 | `client.impl` / `client.proxy` | jmcomic 客户端 |
 | `limits.*` | 本子大小预检与超时（超限返回原因，不强行下载） |
-| `pdf_compress.*` | 下载后 JPEG 重编码与限宽 |
+| `pdf_compress.*` | 拉取时压图（`compress_at_download`）+ 超限 PDF 级 fallback |
 | `deploy.*` | 启动时同步 `plugin/` → `core/jm-Core/plugin/` |
 
 主服务连子服务：`data/server_bots/{port}/aistream.yaml` → `subserver.host` / `port`。

@@ -19,7 +19,8 @@ from fastapi.responses import FileResponse
 from core.plugin_kit import default_plugin_update, load_plugin_config
 
 from ._deploy_sync import sync_qq_plugins
-from ._pdf_compress import maybe_optimize_pdf
+from ._download_compress import attach_download_compress
+from ._pdf_compress import CompressOutcome, mark_pdf_ready, maybe_optimize_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -43,11 +44,14 @@ config = load_plugin_config(
         },
         "pdf_compress": {
             "enabled": True,
-            "jpeg_quality": 84,
-            "max_image_width": 1800,
+            "compress_at_download": True,
+            "jpeg_quality": 62,
+            "max_image_width": 1080,
             "min_bytes": 262144,
-            "min_savings_ratio": 0.05,
-            "optimize_cached": True,
+            "min_savings_ratio": 0,
+            "optimize_cached": False,
+            "fallback_jpeg_quality": 52,
+            "fallback_max_image_width": 900,
         },
         "client": {"impl": "api", "proxy": ""},
         "public_base_url": "",
@@ -220,8 +224,65 @@ def _pdf_result(
     return result
 
 
-def _optimize_pdf_output(pdf_path: Path, *, cached: bool):
-    return maybe_optimize_pdf(pdf_path, config, cached=cached)
+def _compress_at_download_enabled() -> bool:
+    return bool(config.get("pdf_compress.compress_at_download", True))
+
+
+def _pdf_fallback_compress(pdf_path: Path, album_id: str) -> CompressOutcome:
+    fallback_q = int(config.get("pdf_compress.fallback_jpeg_quality", 52) or 52)
+    fallback_w = int(config.get("pdf_compress.fallback_max_image_width", 900) or 900)
+    logger.info(
+        "[jmcomic] PDF 仍超限，PDF 级强压 quality=%d width=%d: %s",
+        fallback_q,
+        fallback_w,
+        pdf_path.name,
+    )
+    return maybe_optimize_pdf(
+        pdf_path,
+        config,
+        cached=False,
+        force=True,
+        overrides={
+            "jpeg_quality": fallback_q,
+            "max_image_width": fallback_w,
+            "min_savings_ratio": 0,
+        },
+    )
+
+
+def _prepare_pdf_for_delivery(
+    pdf_path: Path,
+    album_id: str,
+    *,
+    cached: bool,
+) -> Tuple[Optional[Dict[str, Any]], Optional[CompressOutcome]]:
+    """首次下载：拉取时压图 → 合成 PDF → 必要时 PDF 级 fallback；命中缓存：直接交付。"""
+    compress_outcome: Optional[CompressOutcome] = None
+
+    if cached:
+        size_error = _check_pdf_size_limit(pdf_path, album_id)
+        return size_error, compress_outcome
+
+    if _compress_at_download_enabled() and bool(config.get("pdf_compress.enabled", True)):
+        mark_pdf_ready(pdf_path)
+        size = pdf_path.stat().st_size
+        compress_outcome = CompressOutcome(
+            pdf_path,
+            True,
+            size,
+            size,
+            1.0,
+            "at_download",
+        )
+    else:
+        compress_outcome = maybe_optimize_pdf(pdf_path, config, cached=False)
+
+    size_error = _check_pdf_size_limit(pdf_path, album_id)
+    if size_error is None:
+        return None, compress_outcome
+
+    compress_outcome = _pdf_fallback_compress(pdf_path, album_id)
+    return _check_pdf_size_limit(pdf_path, album_id), compress_outcome
 
 
 def _build_option(download_dir: Path):
@@ -238,6 +299,7 @@ def _build_option(download_dir: Path):
     if proxy:
         option.client.proxy = proxy
 
+    attach_download_compress(option, config)
     return option
 
 
@@ -334,15 +396,18 @@ def _download_sync(album_id: str) -> Dict[str, Any]:
             existing = _find_pdf(pdf_dir, album_id)
             if existing:
                 logger.info("本子 %s 命中已有 PDF，跳过下载: %s", album_id, existing.name)
-                compressed = _optimize_pdf_output(existing, cached=True)
-                size_error = _check_pdf_size_limit(existing, album_id)
+                size_error, compress_outcome = _prepare_pdf_for_delivery(
+                    existing,
+                    album_id,
+                    cached=True,
+                )
                 if size_error:
                     return size_error
                 return _pdf_result(
                     existing,
                     album_id,
                     cached=True,
-                    compress_outcome=compressed,
+                    compress_outcome=compress_outcome,
                 )
 
         from jmcomic import Feature, download_album
@@ -371,8 +436,11 @@ def _download_sync(album_id: str) -> Dict[str, Any]:
         if not pdf_path:
             return _reject(album_id, "PDF 生成失败，未在输出目录找到文件")
 
-        compressed = _optimize_pdf_output(pdf_path, cached=False)
-        size_error = _check_pdf_size_limit(pdf_path, album_id)
+        size_error, compress_outcome = _prepare_pdf_for_delivery(
+            pdf_path,
+            album_id,
+            cached=False,
+        )
         if size_error:
             return size_error
 
@@ -383,7 +451,7 @@ def _download_sync(album_id: str) -> Dict[str, Any]:
             album_id,
             cached=False,
             elapsed=elapsed,
-            compress_outcome=compressed,
+            compress_outcome=compress_outcome,
         )
     except MemoryError:
         logger.error("本子 %s 下载内存不足", album_id, exc_info=True)

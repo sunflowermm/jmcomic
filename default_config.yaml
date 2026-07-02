@@ -16,11 +16,14 @@ limits:
 
 pdf_compress:
   enabled: true
-  jpeg_quality: 78
-  max_image_width: 1400
+  compress_at_download: true  # 拉取时每张图立刻降质，PDF 直接由小图合成
+  jpeg_quality: 62            # 越低体积越小（建议 55–70，漫画可读）
+  max_image_width: 1080       # 长边上限 px，超则缩放
   min_bytes: 262144
-  min_savings_ratio: 0.05
-  optimize_cached: false
+  min_savings_ratio: 0        # PDF 级 fallback 时：0=只要有缩小就替换
+  optimize_cached: false      # 命中本地 PDF 不再重压，直接发送
+  fallback_jpeg_quality: 52   # 仍超 limits.max_pdf_mb 时 PDF 级强压
+  fallback_max_image_width: 900
 
 client:
   impl: api

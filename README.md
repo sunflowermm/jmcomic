@@ -19,7 +19,7 @@ apis/jmcomic/
 |----|------|
 | 运行时 yaml | `data/jmcomic/config.yaml` |
 | 控制台 | 主服 CommonConfig「禁漫本子」（扫描 `core/commonconfig/jmcomic.js`，**无需 pyserver 在线**） |
-| 子服连接 | AIStream → 子服务端（`cfg.subserver`） |
+| 子服连接 | AiWorkflow → 子服务端（`runtimeConfig.subserver`） |
 
 ## API
 

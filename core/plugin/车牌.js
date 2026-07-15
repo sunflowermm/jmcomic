@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import ConfigLoader from '#infrastructure/commonconfig/loader.js'
+import CommonConfigRegistry from '#infrastructure/commonconfig/loader.js'
 import { buildSubserverFileLink } from '#utils/subserver-file-proxy.js'
 import { formatSubserverError, getSubserverConfig } from '#utils/subserver-client.js'
 import { normalizeError } from '#utils/normalize-error.js'
@@ -9,7 +9,7 @@ const RECALL_DELAY_MS = 120_000
 const DOWNLOAD_TIMEOUT_MS = 600_000
 const DEFAULT_CACHE_MAX_FILES = 15
 
-export class ChepaiPlugin extends plugin {
+export class ChepaiPlugin extends PluginBase {
   _recallTimers = new Set()
 
   constructor() {
@@ -32,7 +32,7 @@ export class ChepaiPlugin extends plugin {
     await this.reply('正在处理，请稍候…')
 
     try {
-      const result = await Bot.callSubserver('/api/jmcomic/download', {
+      const result = await AgentRuntime.callSubserver('/api/jmcomic/download', {
         body: { album_id: albumId },
         timeout: DOWNLOAD_TIMEOUT_MS
       })
@@ -88,7 +88,7 @@ export class ChepaiPlugin extends plugin {
       }
     } catch { /* 需从子服务拉取 */ }
 
-    await Bot.fetchSubserverToPath('/api/jmcomic/file', {
+    await AgentRuntime.fetchSubserverToPath('/api/jmcomic/file', {
       query: { path: result.pdf_path },
       dest: cachePath,
       timeout: DOWNLOAD_TIMEOUT_MS
@@ -129,7 +129,7 @@ export class ChepaiPlugin extends plugin {
   }
 
   async _readJmConfig() {
-    const entry = ConfigLoader.get('jmcomic')
+    const entry = CommonConfigRegistry.get('jmcomic')
     if (entry?.read) {
       try {
         const data = await entry.read()
@@ -184,7 +184,7 @@ export class ChepaiPlugin extends plugin {
 
   async _buildDirectLinkUrl(result) {
     const { publicBaseUrl } = await this._readJmConfig()
-    const base = await Bot.getPublicServerUrl(publicBaseUrl)
+    const base = await AgentRuntime.getPublicServerUrl(publicBaseUrl)
     return buildSubserverFileLink(base, result.pdf_path)
   }
 

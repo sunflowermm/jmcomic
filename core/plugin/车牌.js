@@ -162,7 +162,7 @@ export class ChepaiPlugin extends PluginBase {
       msgIds.push(...this._extractMsgIds(linkRes))
     }
 
-    const fileRes = await this.reply([segment.file(pdfPath, fileName)])
+    const fileRes = await this.reply([msgSegment.file(pdfPath, fileName)])
     if (fileRes && !fileRes.error && fileRes !== false) {
       msgIds.push(...this._extractMsgIds(fileRes))
       return { mode: 'file', msgIds }

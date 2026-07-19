@@ -151,7 +151,7 @@ export default class JmcomicStream extends AiWorkflow {
   async _runDownload(albumId) {
     const e = this._sessionEvent()
     try {
-      if (e?.reply) await e.reply(`正在下载车牌 ${albumId}…`)
+      if (e?.reply) await e.reply(`正在下载车牌 ${albumId}…`, true)
       const result = await this._callDownloadApi(albumId)
       if (e) await this._deliverToSession(e, result, '[车牌]')
       return this.successResponse({
@@ -162,7 +162,7 @@ export default class JmcomicStream extends AiWorkflow {
     } catch (err) {
       const hint = formatSubserverError(err, getSubserverConfig())
       RuntimeUtil.makeLog('error', `[车牌] API 失败: ${hint}`, 'JmcomicStream')
-      if (e?.reply) await e.reply(hint).catch(() => {})
+      if (e?.reply) await e.reply(hint, true).catch(() => {})
       return this.errorResponse('SUBSERVER_ERROR', hint)
     }
   }
@@ -171,7 +171,7 @@ export default class JmcomicStream extends AiWorkflow {
     const e = this._sessionEvent()
     try {
       const tip = tag ? `开盲盒（tag:${tag}）中，抽号并下载…` : '开盲盒中，抽号并下载…'
-      if (e?.reply) await e.reply(tip)
+      if (e?.reply) await e.reply(tip, true)
       RuntimeUtil.makeLog('info', `[盲盒] 开始抽号${tag ? ` tag=${tag}` : ''}`, 'JmcomicStream')
       const result = await this._callBlindBoxApi(tag)
       RuntimeUtil.makeLog(
@@ -181,7 +181,7 @@ export default class JmcomicStream extends AiWorkflow {
       )
       if (e) {
         const tagHint = result.tag ? `（${result.tag}）` : ''
-        await e.reply(`抽到车牌：${result.album_id}${tagHint}`)
+        await e.reply(`抽到车牌：${result.album_id}${tagHint}`, true)
         await this._deliverToSession(e, result, '[盲盒]')
       }
       return this.successResponse({
@@ -193,7 +193,7 @@ export default class JmcomicStream extends AiWorkflow {
     } catch (err) {
       const hint = formatSubserverError(err, getSubserverConfig())
       RuntimeUtil.makeLog('error', `[盲盒] 失败: ${hint}`, 'JmcomicStream')
-      if (e?.reply) await e.reply(hint).catch(() => {})
+      if (e?.reply) await e.reply(hint, true).catch(() => {})
       return this.errorResponse('SUBSERVER_ERROR', hint)
     }
   }

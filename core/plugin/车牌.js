@@ -28,11 +28,11 @@ export class ChepaiPlugin extends PluginBase {
   async downloadPdf() {
     const albumId = (this.e.msg || '').replace(/^#车牌\s*/, '').trim()
     if (!/^\d+$/.test(albumId)) {
-      await this.reply('请输入有效本子 ID，例：#车牌123456')
+      await this.reply('请输入有效本子 ID，例：#车牌123456', true)
       return false
     }
 
-    await this.reply('正在处理，请稍候…')
+    await this.reply('正在处理，请稍候…', true)
     return this._downloadAndDeliver(albumId)
   }
 
@@ -41,11 +41,11 @@ export class ChepaiPlugin extends PluginBase {
     const m = String(this.e.msg || '').match(/^#开盲盒(?:\s+(.+))?$/)
     const tag = String(m?.[1] || '').trim()
     if (tag && /^\d+$/.test(tag)) {
-      await this.reply('开盲盒后请跟标签文案，不要跟数字。例：#开盲盒 全彩')
+      await this.reply('开盲盒后请跟标签文案，不要跟数字。例：#开盲盒 全彩', true)
       return true
     }
 
-    await this.reply(tag ? `开盲盒（${tag}）中，抽号并下载…` : '开盲盒中，抽号并下载…')
+    await this.reply(tag ? `开盲盒（${tag}）中，抽号并下载…` : '开盲盒中，抽号并下载…', true)
 
     try {
       const result = await AgentRuntime.callSubserver('/api/jmcomic/blind-box', {
@@ -54,19 +54,19 @@ export class ChepaiPlugin extends PluginBase {
       })
 
       if (!result?.ok || !result.pdf_path) {
-        await this.reply(result?.error || result?.reason || '开盲盒失败')
+        await this.reply(result?.error || result?.reason || '开盲盒失败', true)
         return true
       }
 
       const tagHint = result.tag ? `（${result.tag}）` : ''
-      await this.reply(`抽到车牌：${result.album_id}${tagHint}`)
+      await this.reply(`抽到车牌：${result.album_id}${tagHint}`, true)
       logger.info(`[盲盒] 抽到 album=${result.album_id} source=${result.pick_source || ''}`)
       await this._deliverOneResult(result)
       return true
     } catch (err) {
       const hint = formatSubserverError(err, getSubserverConfig())
       logger.error(`[盲盒] 失败: ${hint}`)
-      await this.reply(hint)
+      await this.reply(hint, true)
       return true
     }
   }
@@ -81,7 +81,7 @@ export class ChepaiPlugin extends PluginBase {
       if (!result?.ok || !result.pdf_path) {
         const reason = result?.error || result?.reason || '处理失败'
         const detail = result?.detail ? `\n（${result.detail}）` : ''
-        await this.reply(`${reason}${detail}`)
+        await this.reply(`${reason}${detail}`, true)
         return true
       }
 
@@ -94,7 +94,7 @@ export class ChepaiPlugin extends PluginBase {
     } catch (err) {
       const hint = formatSubserverError(err, getSubserverConfig())
       logger.error(`[车牌] 失败: ${hint}`)
-      await this.reply(hint)
+      await this.reply(hint, true)
       return true
     }
   }
@@ -204,7 +204,7 @@ export class ChepaiPlugin extends PluginBase {
     const url = await this._buildDirectLinkUrl(result)
 
     if (url) {
-      const linkRes = await this.reply(`PDF 正在上传群文件，可先下载：\n${url}`)
+      const linkRes = await this.reply(`PDF 正在上传群文件，可先下载：\n${url}`, true)
       msgIds.push(...this._extractMsgIds(linkRes))
     }
 
@@ -222,7 +222,8 @@ export class ChepaiPlugin extends PluginBase {
     }
 
     const fallback = await this.reply(
-      `PDF 已就绪（${sizeMb}MB），群文件发送失败且无法生成公网直链。请在 server.yaml 配置 server.url，或在控制台「禁漫本子」配置 public_base_url`
+      `PDF 已就绪（${sizeMb}MB），群文件发送失败且无法生成公网直链。请在 server.yaml 配置 server.url，或在控制台「禁漫本子」配置 public_base_url`,
+      true
     )
     msgIds.push(...this._extractMsgIds(fallback))
     return { mode: 'failed', msgIds }

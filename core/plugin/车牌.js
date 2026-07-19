@@ -15,10 +15,13 @@ export class ChepaiPlugin extends PluginBase {
   constructor() {
     super({
       name: '车牌插件',
-      dsc: '下载 PDF 后先发直链，再上传群文件，两分钟后撤回',
+      dsc: '#车牌 下载；#开盲盒 排行榜随机；PDF 直链+群文件，两分钟撤回',
       event: 'message',
       priority: 5000,
-      rule: [{ reg: '^#车牌\\s*(.+)$', fnc: 'downloadPdf' }]
+      rule: [
+        { reg: '^#车牌\\s*(.+)$', fnc: 'downloadPdf' },
+        { reg: '^#开盲盒$', fnc: 'blindBox' },
+      ],
     })
   }
 
@@ -30,11 +33,40 @@ export class ChepaiPlugin extends PluginBase {
     }
 
     await this.reply('正在处理，请稍候…')
+    return this._downloadAndDeliver(albumId)
+  }
 
+  /** #开盲盒 — 固定开 1 本 */
+  async blindBox() {
+    await this.reply('开盲盒中，抽号并下载…')
+
+    try {
+      const result = await AgentRuntime.callSubserver('/api/jmcomic/blind-box', {
+        body: {},
+        timeout: DOWNLOAD_TIMEOUT_MS,
+      })
+
+      if (!result?.ok || !result.pdf_path) {
+        await this.reply(result?.error || result?.reason || '开盲盒失败')
+        return true
+      }
+
+      await this.reply(`抽到车牌：${result.album_id}`)
+      await this._deliverOneResult(result)
+      return true
+    } catch (err) {
+      const hint = formatSubserverError(err, getSubserverConfig())
+      logger.error(`[开盲盒] 失败: ${hint}`)
+      await this.reply(hint)
+      return true
+    }
+  }
+
+  async _downloadAndDeliver(albumId) {
     try {
       const result = await AgentRuntime.callSubserver('/api/jmcomic/download', {
         body: { album_id: albumId },
-        timeout: DOWNLOAD_TIMEOUT_MS
+        timeout: DOWNLOAD_TIMEOUT_MS,
       })
 
       if (!result?.ok || !result.pdf_path) {
@@ -44,28 +76,33 @@ export class ChepaiPlugin extends PluginBase {
         return true
       }
 
-      const fileName = result.pdf_name || path.basename(result.pdf_path)
-      const pdfPath = await this._resolvePdfPath(result, albumId)
       if (result.cached) {
         logger.info(`[车牌] 子服务命中已有 PDF album=${albumId}`)
       }
 
-      await this._pruneLocalCache(albumId)
-
-      const { msgIds } = await this._deliverPdf(result, pdfPath, fileName, albumId)
-      if (msgIds.length) {
-        const timer = setTimeout(() => {
-          this._recallTimers.delete(timer)
-          this._recall(msgIds)
-        }, RECALL_DELAY_MS)
-        this._recallTimers.add(timer)
-      }
+      await this._deliverOneResult(result)
       return true
     } catch (err) {
       const hint = formatSubserverError(err, getSubserverConfig())
       logger.error(`[车牌] 失败: ${hint}`)
       await this.reply(hint)
       return true
+    }
+  }
+
+  async _deliverOneResult(result) {
+    const albumId = String(result.album_id || '')
+    const fileName = result.pdf_name || path.basename(result.pdf_path)
+    const pdfPath = await this._resolvePdfPath(result, albumId)
+    await this._pruneLocalCache(albumId)
+
+    const { msgIds } = await this._deliverPdf(result, pdfPath, fileName, albumId)
+    if (msgIds.length) {
+      const timer = setTimeout(() => {
+        this._recallTimers.delete(timer)
+        this._recall(msgIds)
+      }, RECALL_DELAY_MS)
+      this._recallTimers.add(timer)
     }
   }
 

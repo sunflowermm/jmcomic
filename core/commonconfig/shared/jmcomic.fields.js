@@ -105,5 +105,28 @@ export default {
     fields: {
       cache_max_files: { type: 'number', label: '本地 PDF 缓存份数', min: 1, default: 15, component: 'InputNumber' }
     }
+  },
+  blind_box: {
+    type: 'object',
+    label: '开盲盒',
+    component: 'SubForm',
+    fields: {
+      ranking: {
+        type: 'string',
+        label: '排行榜',
+        description: 'day / week / month',
+        component: 'Input',
+        default: 'day'
+      },
+      category: { type: 'string', label: '分类 ID', component: 'Input', default: '0' },
+      page: { type: 'number', label: '排行榜页码', min: 1, default: 1, component: 'InputNumber' },
+      seed_ids: {
+        type: 'array',
+        label: '指定车牌池',
+        description: '非空则优先从此列表随机抽 1 个',
+        component: 'Input',
+        default: []
+      }
+    }
   }
 };

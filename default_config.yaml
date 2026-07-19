@@ -48,3 +48,10 @@ public_base_url: ""   # 公网访问前缀；留空则用 server.yaml 的 server
 
 qq:
   cache_max_files: 15   # 主服从子服拉取 PDF 后在 data/jmcomic/cache 保留份数
+
+# --- 开盲盒（固定随机 1 本）---
+blind_box:
+  ranking: day          # day | week | month
+  category: "0"         # 分类，0=全部
+  page: 1               # 排行榜页码
+  seed_ids: []          # 非空时优先从此列表抽号（纯数字车牌）

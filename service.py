@@ -457,6 +457,84 @@ async def download_handler(request: Request):
         return _reject(album_id, str(exc))
 
 
+def _pick_blind_album_id() -> str:
+    """从 seed_ids 或日/周/月榜随机抽一个车牌号。"""
+    import random
+
+    seed_raw = config.get("blind_box.seed_ids") or []
+    seed_ids = [
+        str(x).strip()
+        for x in (seed_raw if isinstance(seed_raw, list) else [])
+        if _ALBUM_ID_RE.fullmatch(str(x).strip())
+    ]
+    if seed_ids:
+        return random.choice(seed_ids)
+
+    ranking = str(config.get("blind_box.ranking", "day") or "day").lower()
+    category = str(config.get("blind_box.category", "0") or "0")
+    try:
+        page = max(1, int(config.get("blind_box.page", 1) or 1))
+    except (TypeError, ValueError):
+        page = 1
+
+    download_dir, _ = _storage_dirs()
+    option = _build_option(download_dir)
+    client = option.new_jm_client()
+    if ranking == "week":
+        page_obj = client.week_ranking(page=page, category=category)
+    elif ranking == "month":
+        page_obj = client.month_ranking(page=page, category=category)
+    else:
+        page_obj = client.day_ranking(page=page, category=category)
+
+    ids = [str(aid) for aid, _title in page_obj.iter_id_title() if _ALBUM_ID_RE.fullmatch(str(aid))]
+    if not ids:
+        raise ValueError("排行榜无可用本子，请检查网络/代理或配置 blind_box.seed_ids")
+    return random.choice(ids)
+
+
+def _blind_box_sync() -> Dict[str, Any]:
+    try:
+        album_id = _pick_blind_album_id()
+    except Exception as exc:
+        logger.error("开盲盒抽号失败: %s", exc, exc_info=True)
+        return {"ok": False, "error": f"抽号失败: {exc}", "album_id": ""}
+
+    result = _download_sync(album_id)
+    if isinstance(result, dict):
+        result["source"] = "blind_box"
+    return result
+
+
+async def blind_box_handler(request: Request):
+    # 固定开 1 本；忽略 body（兼容空 POST）
+    try:
+        await request.json()
+    except Exception:
+        pass
+
+    timeout_sec = int(config.get("limits.download_timeout_sec", 1800) or 1800)
+    semaphore, executor = _ensure_download_pool()
+    try:
+        async with semaphore:
+            loop = asyncio.get_running_loop()
+            future = loop.run_in_executor(executor, _blind_box_sync)
+            if timeout_sec > 0:
+                return await asyncio.wait_for(future, timeout=timeout_sec)
+            return await future
+    except asyncio.TimeoutError:
+        return {
+            "ok": False,
+            "error": f"开盲盒超时（>{timeout_sec}秒）",
+            "album_id": "",
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("开盲盒失败: %s", exc, exc_info=True)
+        return {"ok": False, "error": str(exc), "album_id": ""}
+
+
 def _safe_pdf_path(raw: str) -> Path:
     if not raw or ".." in raw.replace("\\", "/"):
         raise HTTPException(status_code=400, detail="非法文件路径")
@@ -538,6 +616,7 @@ default = {
     "on_update": jmcomic_update,
     "routes": [
         {"method": "POST", "path": "/api/jmcomic/download", "handler": download_handler},
+        {"method": "POST", "path": "/api/jmcomic/blind-box", "handler": blind_box_handler},
         {"method": "GET", "path": "/api/jmcomic/file", "handler": file_handler},
     ],
 }

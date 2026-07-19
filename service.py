@@ -457,8 +457,12 @@ async def download_handler(request: Request):
         return _reject(album_id, str(exc))
 
 
-def _pick_blind_album_id() -> str:
-    """从 seed_ids 或日/周/月榜随机抽一个车牌号。"""
+def _pick_blind_album_id(tag: str = "") -> Tuple[str, str]:
+    """抽一个车牌号。优先级：seed_ids → tag 搜索 → 日/周/月榜。
+
+    Returns:
+        (album_id, source)  source 为 seed | tag | ranking
+    """
     import random
 
     seed_raw = config.get("blind_box.seed_ids") or []
@@ -468,9 +472,9 @@ def _pick_blind_album_id() -> str:
         if _ALBUM_ID_RE.fullmatch(str(x).strip())
     ]
     if seed_ids:
-        return random.choice(seed_ids)
+        return random.choice(seed_ids), "seed"
 
-    ranking = str(config.get("blind_box.ranking", "day") or "day").lower()
+    tag_q = (tag or config.get("blind_box.tag") or "").strip()
     category = str(config.get("blind_box.category", "0") or "0")
     try:
         page = max(1, int(config.get("blind_box.page", 1) or 1))
@@ -480,6 +484,16 @@ def _pick_blind_album_id() -> str:
     download_dir, _ = _storage_dirs()
     option = _build_option(download_dir)
     client = option.new_jm_client()
+
+    if tag_q:
+        logger.info("[盲盒] 按 tag 抽号: %s page=%s", tag_q, page)
+        page_obj = client.search_tag(tag_q, page=page, category=category)
+        ids = [str(aid) for aid, _title in page_obj.iter_id_title() if _ALBUM_ID_RE.fullmatch(str(aid))]
+        if not ids:
+            raise ValueError(f"标签「{tag_q}」无可用本子，请换 tag 或检查网络")
+        return random.choice(ids), "tag"
+
+    ranking = str(config.get("blind_box.ranking", "day") or "day").lower()
     if ranking == "week":
         page_obj = client.week_ranking(page=page, category=category)
     elif ranking == "month":
@@ -489,36 +503,47 @@ def _pick_blind_album_id() -> str:
 
     ids = [str(aid) for aid, _title in page_obj.iter_id_title() if _ALBUM_ID_RE.fullmatch(str(aid))]
     if not ids:
-        raise ValueError("排行榜无可用本子，请检查网络/代理或配置 blind_box.seed_ids")
-    return random.choice(ids)
+        raise ValueError("排行榜无可用本子，请检查网络或配置 blind_box.seed_ids / tag")
+    return random.choice(ids), "ranking"
 
 
-def _blind_box_sync() -> Dict[str, Any]:
+def _blind_box_sync(tag: str = "") -> Dict[str, Any]:
     try:
-        album_id = _pick_blind_album_id()
+        album_id, pick_source = _pick_blind_album_id(tag)
     except Exception as exc:
-        logger.error("开盲盒抽号失败: %s", exc, exc_info=True)
+        logger.error("[盲盒] 抽号失败: %s", exc, exc_info=True)
         return {"ok": False, "error": f"抽号失败: {exc}", "album_id": ""}
 
     result = _download_sync(album_id)
     if isinstance(result, dict):
         result["source"] = "blind_box"
+        result["pick_source"] = pick_source
+        if tag or config.get("blind_box.tag"):
+            result["tag"] = (tag or config.get("blind_box.tag") or "").strip()
     return result
 
 
 async def blind_box_handler(request: Request):
-    # 固定开 1 本；忽略 body（兼容空 POST）
+    # 固定开 1 本；body 可选 { "tag": "全彩" }
+    body: Dict[str, Any] = {}
     try:
-        await request.json()
+        raw = await request.json()
+        if isinstance(raw, dict):
+            body = raw
     except Exception:
         pass
+
+    tag = str(body.get("tag") or body.get("tags") or "").strip()
+    # 仅允许标签文案，拒绝纯数字（避免和旧「份数」混淆）
+    if tag and _ALBUM_ID_RE.fullmatch(tag):
+        raise HTTPException(status_code=400, detail="tag 不能为纯数字")
 
     timeout_sec = int(config.get("limits.download_timeout_sec", 1800) or 1800)
     semaphore, executor = _ensure_download_pool()
     try:
         async with semaphore:
             loop = asyncio.get_running_loop()
-            future = loop.run_in_executor(executor, _blind_box_sync)
+            future = loop.run_in_executor(executor, _blind_box_sync, tag)
             if timeout_sec > 0:
                 return await asyncio.wait_for(future, timeout=timeout_sec)
             return await future
@@ -531,7 +556,7 @@ async def blind_box_handler(request: Request):
     except HTTPException:
         raise
     except Exception as exc:
-        logger.error("开盲盒失败: %s", exc, exc_info=True)
+        logger.error("[盲盒] 失败: %s", exc, exc_info=True)
         return {"ok": False, "error": str(exc), "album_id": ""}
 
 

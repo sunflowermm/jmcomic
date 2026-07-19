@@ -24,23 +24,23 @@ apis/jmcomic/
 
 ## API
 
-- `POST /api/jmcomic/download` — body `{ album_id }`（纯数字）
-- `POST /api/jmcomic/blind-box` — 无参，固定随机 1 本（响应同 download）
+- `POST /api/jmcomic/download` — `{ album_id }`
+- `POST /api/jmcomic/blind-box` — 可选 `{ tag }`；固定 1 本（含 `pick_source` / `tag`）
 - `GET /api/jmcomic/file?path=...`
+
+抽号：`seed_ids` → `tag`（`search_tag`）→ `ranking`。
 
 ## QQ
 
-- `#车牌123456` — 指定车牌下载并交付
-- `#开盲盒` — 排行榜随机 1 本（不要后缀数字）
+- `#车牌123456` — 指定车牌
+- `#开盲盒` / `#开盲盒 全彩` — 随机 1 本（后缀为标签文案，不要跟数字）
 
-## AI（chat 工具面）
-
-工作流名 `jmcomic`（`frameworkToolSurface: true`）：
+## AI
 
 | 工具 | 入参 |
 |------|------|
-| `jmcomic.jm_download` | `album_id` 纯数字 |
-| `jmcomic.jm_blind_box` | 无 |
+| `jmcomic.jm_download` | `album_id` |
+| `jmcomic.jm_blind_box` | 可选 `tag` |
 
-有会话时代发 `#车牌` / `#开盲盒`；无会话只调子服 API 返回元数据。  
-**勿**把本插件写进框架 `PyserverApi`（第三方本地插件）。
+有会话：API + 车牌插件交付（不套 `PluginLoader.deal`）。  
+**勿**写入框架 `PyserverApi`。

@@ -87,8 +87,7 @@ export default {
     label: '禁漫客户端',
     component: 'SubForm',
     fields: {
-      impl: { type: 'string', label: '实现', component: 'Input', default: 'api' },
-      proxy: { type: 'string', label: 'HTTP 代理', component: 'Input', default: '' }
+      impl: { type: 'string', label: '实现', component: 'Input', default: 'api' }
     }
   },
   public_base_url: {
@@ -111,15 +110,22 @@ export default {
     label: '开盲盒',
     component: 'SubForm',
     fields: {
+      tag: {
+        type: 'string',
+        label: '默认标签',
+        description: '非空则用 search_tag；指令 #开盲盒 标签 / AI tag 可临时覆盖',
+        component: 'Input',
+        default: ''
+      },
       ranking: {
         type: 'string',
         label: '排行榜',
-        description: 'day / week / month',
+        description: '无 tag 时：day / week / month',
         component: 'Input',
         default: 'day'
       },
       category: { type: 'string', label: '分类 ID', component: 'Input', default: '0' },
-      page: { type: 'number', label: '排行榜页码', min: 1, default: 1, component: 'InputNumber' },
+      page: { type: 'number', label: '搜索/排行榜页码', min: 1, default: 1, component: 'InputNumber' },
       seed_ids: {
         type: 'array',
         label: '指定车牌池',

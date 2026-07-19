@@ -15,12 +15,12 @@ export class ChepaiPlugin extends PluginBase {
   constructor() {
     super({
       name: '车牌插件',
-      dsc: '#车牌 下载；#开盲盒 排行榜随机；PDF 直链+群文件，两分钟撤回',
+      dsc: '#车牌 下载；#开盲盒 [标签]；PDF 直链+群文件，两分钟撤回',
       event: 'message',
       priority: 5000,
       rule: [
         { reg: '^#车牌\\s*(.+)$', fnc: 'downloadPdf' },
-        { reg: '^#开盲盒$', fnc: 'blindBox' },
+        { reg: '^#开盲盒(?:\\s+(.+))?$', fnc: '盲盒' },
       ],
     })
   }
@@ -36,13 +36,20 @@ export class ChepaiPlugin extends PluginBase {
     return this._downloadAndDeliver(albumId)
   }
 
-  /** #开盲盒 — 固定开 1 本 */
-  async blindBox() {
-    await this.reply('开盲盒中，抽号并下载…')
+  /** #开盲盒 [标签] — 固定开 1 本；日志 tag=[盲盒] */
+  async 盲盒() {
+    const m = String(this.e.msg || '').match(/^#开盲盒(?:\s+(.+))?$/)
+    const tag = String(m?.[1] || '').trim()
+    if (tag && /^\d+$/.test(tag)) {
+      await this.reply('开盲盒后请跟标签文案，不要跟数字。例：#开盲盒 全彩')
+      return true
+    }
+
+    await this.reply(tag ? `开盲盒（${tag}）中，抽号并下载…` : '开盲盒中，抽号并下载…')
 
     try {
       const result = await AgentRuntime.callSubserver('/api/jmcomic/blind-box', {
-        body: {},
+        body: tag ? { tag } : {},
         timeout: DOWNLOAD_TIMEOUT_MS,
       })
 
@@ -51,12 +58,14 @@ export class ChepaiPlugin extends PluginBase {
         return true
       }
 
-      await this.reply(`抽到车牌：${result.album_id}`)
+      const tagHint = result.tag ? `（${result.tag}）` : ''
+      await this.reply(`抽到车牌：${result.album_id}${tagHint}`)
+      logger.info(`[盲盒] 抽到 album=${result.album_id} source=${result.pick_source || ''}`)
       await this._deliverOneResult(result)
       return true
     } catch (err) {
       const hint = formatSubserverError(err, getSubserverConfig())
-      logger.error(`[开盲盒] 失败: ${hint}`)
+      logger.error(`[盲盒] 失败: ${hint}`)
       await this.reply(hint)
       return true
     }

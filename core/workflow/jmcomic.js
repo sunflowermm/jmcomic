@@ -1,29 +1,35 @@
 /**
  * jmcomic AI 工作流 — MCP：车牌下载 / 开盲盒
  *
- * 有会话 e：调子服 API → 用车牌插件交付 PDF（不走 PluginLoader.deal，
- * 避免同 message_id 被 msgThrottle 静默丢弃）。
+ * 有会话 e：调子服 API → 车牌插件交付；文字/链接/PDF 收集 id 后统一两分钟撤回。
  * 无会话：只返回下载元数据。
  */
 import AiWorkflow from '#infrastructure/ai-workflow/ai-workflow.js'
 import { getWorkflowRequestContext } from '#infrastructure/ai-workflow/workflow-request-context.js'
 import RuntimeUtil from '#utils/runtime-util.js'
 import { formatSubserverError, getSubserverConfig } from '#utils/subserver-client.js'
+import { extractMsgIds, scheduleMsgRecall } from '#utils/msg-recall.js'
 import { ChepaiPlugin } from '../plugin/车牌.js'
 
 const DOWNLOAD_TIMEOUT_MS = 600_000
+const RECALL_DELAY_MS = 120_000
+const RECALL_TAG = '车牌撤回'
 
 function digitsOnly(raw) {
   const s = String(raw ?? '').trim()
   return /^\d+$/.test(s) ? s : null
 }
 
+function scheduleAll(e, msgIds) {
+  return scheduleMsgRecall(e, msgIds, { delayMs: RECALL_DELAY_MS, logTag: RECALL_TAG })
+}
+
 export default class JmcomicStream extends AiWorkflow {
   constructor() {
     super({
       name: 'jmcomic',
-      description: '禁漫本子：车牌下载（传数字）、开盲盒（无参随机一本）',
-      version: '1.2.0',
+      description: '禁漫本子：车牌下载（传数字）、开盲盒（可选 tag）',
+      version: '1.3.0',
       author: 'XRK',
       priority: 88,
       capabilities: ['tools', 'prompt'],
@@ -40,9 +46,13 @@ export default class JmcomicStream extends AiWorkflow {
   buildSystemPrompt() {
     return [
       '禁漫本子（jmcomic）：',
-      '- jmcomic.jm_download：用户给出本子车牌号（纯数字）时调用，参数 album_id。',
-      '- jmcomic.jm_blind_box：开盲盒；可选 tag（如「全彩」）。用户说「开盲盒 xxx」时把 xxx 传入 tag。',
-      '工具成功返回表示下载已完成；有 QQ 会话时 PDF 已发送。根据返回的 album_id/title 告知结果，不要再说「正在下载」。',
+      '- jmcomic.jm_download：车牌号纯数字，参数 album_id。',
+      '- jmcomic.jm_blind_box：开盲盒。可选 tag（多标签空格分隔）。',
+      '  tag 格式：',
+      '  · 「全彩 中文」→ 同时含两标签（内部转 +全彩 +中文）',
+      '  · 「+单行本 +中文 -CG」→ 显式包含/排除',
+      '  · 不要传纯数字；用户说「开盲盒 全彩 中文」时把「全彩 中文」整段传入 tag。',
+      '工具成功返回表示已下载；有 QQ 会话时 PDF 已发送。据 album_id/title/tag_query 告知结果，勿再说正在下载。',
     ].join('\n')
   }
 
@@ -76,13 +86,15 @@ export default class JmcomicStream extends AiWorkflow {
 
     this.registerMCPTool('jm_blind_box', {
       description:
-        '开盲盒：随机抽 1 本并下载。可选 tag=禁漫标签（如全彩）；不传则用配置或日榜。成功后 PDF 已发送（有会话时）。',
+        '开盲盒：随机抽 1 本并下载。tag 支持多标签空格分隔（全彩 中文 → AND）；也可用 +A +B -C。不传则用配置或日榜。',
       inputSchema: {
         type: 'object',
         properties: {
           tag: {
             type: 'string',
-            description: '可选。禁漫标签文案（非数字），按标签池随机抽一本',
+            description:
+              '可选。禁漫标签查询，非纯数字。多标签空格分隔：' +
+              '「全彩 中文」或「+全彩 +中文 -CG」。原样传给子服，由 search_tag + 标签列表校验。',
           },
         },
         required: [],
@@ -90,7 +102,10 @@ export default class JmcomicStream extends AiWorkflow {
       handler: async (args = {}) => {
         const tag = String(args.tag ?? args.tags ?? '').trim()
         if (tag && /^\d+$/.test(tag)) {
-          return this.errorResponse('INVALID_PARAM', 'tag 不能为纯数字')
+          return this.errorResponse(
+            'INVALID_PARAM',
+            'tag 不能为纯数字；多标签请空格分隔，例：全彩 中文'
+          )
         }
         return this._runBlindBox(tag)
       },
@@ -102,12 +117,18 @@ export default class JmcomicStream extends AiWorkflow {
     return getWorkflowRequestContext()?.e || null
   }
 
-  /** 挂会话 e，复用车牌插件的 PDF 拉取/群文件/直链交付 */
+  async _replyQuote(e, msg) {
+    if (!e?.reply) return []
+    const res = await e.reply(msg, true)
+    return extractMsgIds(res)
+  }
+
+  /** @returns {Promise<Array<string|number>>} */
   async _deliverToSession(e, result, tag = '[车牌]') {
     const plugin = new ChepaiPlugin()
     plugin.e = e
     RuntimeUtil.makeLog('info', `${tag} AI 会话交付 album=${result.album_id}`, 'JmcomicStream')
-    await plugin._deliverOneResult(result)
+    return plugin._deliverOneResult(result)
   }
 
   async _callDownloadApi(albumId) {
@@ -145,15 +166,18 @@ export default class JmcomicStream extends AiWorkflow {
       size: result.size,
       pick_source: result.pick_source,
       tag: result.tag,
+      tag_query: result.tag_query,
     }
   }
 
   async _runDownload(albumId) {
     const e = this._sessionEvent()
+    const ids = []
     try {
-      if (e?.reply) await e.reply(`正在下载车牌 ${albumId}…`, true)
+      ids.push(...(await this._replyQuote(e, `正在下载车牌 ${albumId}…`)))
       const result = await this._callDownloadApi(albumId)
-      if (e) await this._deliverToSession(e, result, '[车牌]')
+      if (e) ids.push(...(await this._deliverToSession(e, result, '[车牌]')))
+      scheduleAll(e, ids)
       return this.successResponse({
         mode: e ? 'session' : 'api',
         delivered: Boolean(e),
@@ -162,16 +186,20 @@ export default class JmcomicStream extends AiWorkflow {
     } catch (err) {
       const hint = formatSubserverError(err, getSubserverConfig())
       RuntimeUtil.makeLog('error', `[车牌] API 失败: ${hint}`, 'JmcomicStream')
-      if (e?.reply) await e.reply(hint, true).catch(() => {})
+      try {
+        ids.push(...(await this._replyQuote(e, hint)))
+      } catch { /* ignore */ }
+      scheduleAll(e, ids)
       return this.errorResponse('SUBSERVER_ERROR', hint)
     }
   }
 
   async _runBlindBox(tag = '') {
     const e = this._sessionEvent()
+    const ids = []
     try {
       const tip = tag ? `开盲盒（tag:${tag}）中，抽号并下载…` : '开盲盒中，抽号并下载…'
-      if (e?.reply) await e.reply(tip, true)
+      ids.push(...(await this._replyQuote(e, tip)))
       RuntimeUtil.makeLog('info', `[盲盒] 开始抽号${tag ? ` tag=${tag}` : ''}`, 'JmcomicStream')
       const result = await this._callBlindBoxApi(tag)
       RuntimeUtil.makeLog(
@@ -180,10 +208,11 @@ export default class JmcomicStream extends AiWorkflow {
         'JmcomicStream'
       )
       if (e) {
-        const tagHint = result.tag ? `（${result.tag}）` : ''
-        await e.reply(`抽到车牌：${result.album_id}${tagHint}`, true)
-        await this._deliverToSession(e, result, '[盲盒]')
+        const tagHint = result.tag_query || result.tag ? `（${result.tag_query || result.tag}）` : ''
+        ids.push(...(await this._replyQuote(e, `抽到车牌：${result.album_id}${tagHint}`)))
+        ids.push(...(await this._deliverToSession(e, result, '[盲盒]')))
       }
+      scheduleAll(e, ids)
       return this.successResponse({
         mode: e ? 'session' : 'api',
         delivered: Boolean(e),
@@ -193,7 +222,10 @@ export default class JmcomicStream extends AiWorkflow {
     } catch (err) {
       const hint = formatSubserverError(err, getSubserverConfig())
       RuntimeUtil.makeLog('error', `[盲盒] 失败: ${hint}`, 'JmcomicStream')
-      if (e?.reply) await e.reply(hint, true).catch(() => {})
+      try {
+        ids.push(...(await this._replyQuote(e, hint)))
+      } catch { /* ignore */ }
+      scheduleAll(e, ids)
       return this.errorResponse('SUBSERVER_ERROR', hint)
     }
   }

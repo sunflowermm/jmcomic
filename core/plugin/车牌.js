@@ -4,18 +4,22 @@ import CommonConfigRegistry from '#infrastructure/commonconfig/loader.js'
 import { buildSubserverFileLink } from '#utils/subserver-file-proxy.js'
 import { formatSubserverError, getSubserverConfig } from '#utils/subserver-client.js'
 import { normalizeError } from '#utils/normalize-error.js'
+import { extractMsgIds, scheduleMsgRecall } from '#utils/msg-recall.js'
 
 const RECALL_DELAY_MS = 120_000
 const DOWNLOAD_TIMEOUT_MS = 600_000
 const DEFAULT_CACHE_MAX_FILES = 15
+const RECALL_TAG = '车牌撤回'
+
+function scheduleAll(e, msgIds) {
+  return scheduleMsgRecall(e, msgIds, { delayMs: RECALL_DELAY_MS, logTag: RECALL_TAG })
+}
 
 export class ChepaiPlugin extends PluginBase {
-  _recallTimers = new Set()
-
   constructor() {
     super({
       name: '车牌插件',
-      dsc: '#车牌 下载；#开盲盒 [标签]；PDF 直链+群文件，两分钟撤回',
+      dsc: '#车牌；#开盲盒 [标签…]（空格多标签）；文字/直链/PDF 两分钟同时撤回',
       event: 'message',
       priority: 5000,
       rule: [
@@ -25,27 +29,41 @@ export class ChepaiPlugin extends PluginBase {
     })
   }
 
+  /** 文字/链接：引用；收集 id，交付完成后再统一定时撤回 */
+  async _replyText(msg) {
+    const res = await this.reply(msg, true)
+    return extractMsgIds(res)
+  }
+
   async downloadPdf() {
     const albumId = (this.e.msg || '').replace(/^#车牌\s*/, '').trim()
     if (!/^\d+$/.test(albumId)) {
-      await this.reply('请输入有效本子 ID，例：#车牌123456', true)
+      await this._replyText('请输入有效本子 ID，例：#车牌123456')
       return false
     }
 
-    await this.reply('正在处理，请稍候…', true)
-    return this._downloadAndDeliver(albumId)
+    const ids = [...(await this._replyText('正在处理，请稍候…'))]
+    ids.push(...(await this._downloadAndDeliver(albumId)))
+    scheduleAll(this.e, ids)
+    return true
   }
 
-  /** #开盲盒 [标签] — 固定开 1 本；日志 tag=[盲盒] */
+  /** #开盲盒 [标签] — 固定开 1 本；文字+链接+PDF 一并撤回 */
   async 盲盒() {
     const m = String(this.e.msg || '').match(/^#开盲盒(?:\s+(.+))?$/)
     const tag = String(m?.[1] || '').trim()
     if (tag && /^\d+$/.test(tag)) {
-      await this.reply('开盲盒后请跟标签文案，不要跟数字。例：#开盲盒 全彩', true)
+      await this._replyText(
+        '开盲盒 tag 不能为纯数字。多标签空格分隔，例：#开盲盒 全彩 中文\n也可用：#开盲盒 +全彩 +中文 -CG'
+      )
       return true
     }
 
-    await this.reply(tag ? `开盲盒（${tag}）中，抽号并下载…` : '开盲盒中，抽号并下载…', true)
+    const ids = [
+      ...(await this._replyText(
+        tag ? `开盲盒（${tag}）中，抽号并下载…` : '开盲盒中，抽号并下载…'
+      )),
+    ]
 
     try {
       const result = await AgentRuntime.callSubserver('/api/jmcomic/blind-box', {
@@ -54,24 +72,31 @@ export class ChepaiPlugin extends PluginBase {
       })
 
       if (!result?.ok || !result.pdf_path) {
-        await this.reply(result?.error || result?.reason || '开盲盒失败', true)
+        ids.push(...(await this._replyText(result?.error || result?.reason || '开盲盒失败')))
+        scheduleAll(this.e, ids)
         return true
       }
 
-      const tagHint = result.tag ? `（${result.tag}）` : ''
-      await this.reply(`抽到车牌：${result.album_id}${tagHint}`, true)
-      logger.info(`[盲盒] 抽到 album=${result.album_id} source=${result.pick_source || ''}`)
-      await this._deliverOneResult(result)
+      const tagHint = result.tag_query || result.tag ? `（${result.tag_query || result.tag}）` : ''
+      ids.push(...(await this._replyText(`抽到车牌：${result.album_id}${tagHint}`)))
+      logger.info(
+        `[盲盒] 抽到 album=${result.album_id} source=${result.pick_source || ''} query=${result.tag_query || ''}`
+      )
+      ids.push(...(await this._deliverOneResult(result)))
+      scheduleAll(this.e, ids)
       return true
     } catch (err) {
       const hint = formatSubserverError(err, getSubserverConfig())
       logger.error(`[盲盒] 失败: ${hint}`)
-      await this.reply(hint, true)
+      ids.push(...(await this._replyText(hint)))
+      scheduleAll(this.e, ids)
       return true
     }
   }
 
+  /** @returns {Promise<Array<string|number>>} */
   async _downloadAndDeliver(albumId) {
+    const ids = []
     try {
       const result = await AgentRuntime.callSubserver('/api/jmcomic/download', {
         body: { album_id: albumId },
@@ -81,38 +106,34 @@ export class ChepaiPlugin extends PluginBase {
       if (!result?.ok || !result.pdf_path) {
         const reason = result?.error || result?.reason || '处理失败'
         const detail = result?.detail ? `\n（${result.detail}）` : ''
-        await this.reply(`${reason}${detail}`, true)
-        return true
+        ids.push(...(await this._replyText(`${reason}${detail}`)))
+        return ids
       }
 
       if (result.cached) {
         logger.info(`[车牌] 子服务命中已有 PDF album=${albumId}`)
       }
 
-      await this._deliverOneResult(result)
-      return true
+      ids.push(...(await this._deliverOneResult(result)))
+      return ids
     } catch (err) {
       const hint = formatSubserverError(err, getSubserverConfig())
       logger.error(`[车牌] 失败: ${hint}`)
-      await this.reply(hint, true)
-      return true
+      ids.push(...(await this._replyText(hint)))
+      return ids
     }
   }
 
+  /**
+   * 交付：直链（引用）+ PDF 群文件（不引用）；返回全部 message_id
+   * @returns {Promise<Array<string|number>>}
+   */
   async _deliverOneResult(result) {
     const albumId = String(result.album_id || '')
     const fileName = result.pdf_name || path.basename(result.pdf_path)
     const pdfPath = await this._resolvePdfPath(result, albumId)
     await this._pruneLocalCache(albumId)
-
-    const { msgIds } = await this._deliverPdf(result, pdfPath, fileName, albumId)
-    if (msgIds.length) {
-      const timer = setTimeout(() => {
-        this._recallTimers.delete(timer)
-        this._recall(msgIds)
-      }, RECALL_DELAY_MS)
-      this._recallTimers.add(timer)
-    }
+    return this._deliverPdf(result, pdfPath, fileName, albumId)
   }
 
   async _resolvePdfPath(result, albumId) {
@@ -137,7 +158,7 @@ export class ChepaiPlugin extends PluginBase {
     await AgentRuntime.fetchSubserverToPath('/api/jmcomic/file', {
       query: { path: result.pdf_path },
       dest: cachePath,
-      timeout: DOWNLOAD_TIMEOUT_MS
+      timeout: DOWNLOAD_TIMEOUT_MS,
     })
     logger.info(`[车牌] 已从子服务端流式拉取 PDF album=${albumId}`)
     return cachePath
@@ -204,29 +225,31 @@ export class ChepaiPlugin extends PluginBase {
     const url = await this._buildDirectLinkUrl(result)
 
     if (url) {
-      const linkRes = await this.reply(`PDF 正在上传群文件，可先下载：\n${url}`, true)
-      msgIds.push(...this._extractMsgIds(linkRes))
+      msgIds.push(...(await this._replyText(`PDF 正在上传群文件，可先下载：\n${url}`)))
     }
 
+    // 群文件：不引用，但仍收集 message_id 与文字/链接一并撤回
     const fileRes = await this.reply([msgSegment.file(pdfPath, fileName)])
     if (fileRes && !fileRes.error && fileRes !== false) {
-      msgIds.push(...this._extractMsgIds(fileRes))
-      return { mode: 'file', msgIds }
+      const fileIds = extractMsgIds(fileRes)
+      if (!fileIds.length) {
+        logger.warn(`[车牌] PDF 已发送但未解析到 message_id，无法定时撤回群文件 album=${albumId}`)
+      }
+      msgIds.push(...fileIds)
+      return msgIds
     }
 
     const reason = Error.isError(fileRes?.error) ? fileRes.error.message : '发送失败'
     logger.warn(`[车牌] 群文件发送失败 album=${albumId} (${sizeMb}MB): ${reason}`)
 
-    if (url) {
-      return { mode: 'link-only', msgIds }
-    }
+    if (url) return msgIds
 
-    const fallback = await this.reply(
-      `PDF 已就绪（${sizeMb}MB），群文件发送失败且无法生成公网直链。请在 server.yaml 配置 server.url，或在控制台「禁漫本子」配置 public_base_url`,
-      true
+    msgIds.push(
+      ...(await this._replyText(
+        `PDF 已就绪（${sizeMb}MB），群文件发送失败且无法生成公网直链。请在 server.yaml 配置 server.url，或在控制台「禁漫本子」配置 public_base_url`
+      ))
     )
-    msgIds.push(...this._extractMsgIds(fallback))
-    return { mode: 'failed', msgIds }
+    return msgIds
   }
 
   async _buildDirectLinkUrl(result) {
@@ -234,32 +257,6 @@ export class ChepaiPlugin extends PluginBase {
     const base = await AgentRuntime.getPublicServerUrl(publicBaseUrl)
     return buildSubserverFileLink(base, result.pdf_path)
   }
-
-  _extractMsgIds(msgRes) {
-    if (!msgRes || msgRes.error || msgRes === false) return []
-    if (Array.isArray(msgRes.message_id)) return msgRes.message_id.filter(Boolean)
-    if (msgRes.message_id) return [msgRes.message_id]
-    if (Array.isArray(msgRes.data)) {
-      return msgRes.data.map(item => item?.message_id).filter(Boolean)
-    }
-    return []
-  }
-
-  _recall(msgIds) {
-    const target = this.e.isGroup ? this.e.group : this.e.friend
-    if (!target?.recallMsg) return
-
-    for (const id of msgIds) {
-      Promise.resolve(target.recallMsg(id)).catch(recallErr => {
-        logger.debug(`[车牌] 撤回失败 msgId=${id}: ${normalizeError(recallErr).message}`)
-      })
-    }
-  }
-
-  destroy() {
-    for (const timer of this._recallTimers) {
-      clearTimeout(timer)
-    }
-    this._recallTimers.clear()
-  }
 }
+
+export { extractMsgIds, scheduleMsgRecall }

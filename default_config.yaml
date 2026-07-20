@@ -52,9 +52,13 @@ qq:
 
 # --- 开盲盒（固定随机 1 本）---
 # 抽号优先级：seed_ids → tag（指令/请求/配置）→ ranking
+# tag 格式：空格分隔；「全彩 中文」→ +全彩 +中文；也支持 +A +B -C
 blind_box:
-  tag: ""               # 默认标签；#开盲盒 全彩 / API tag 可临时覆盖
+  tag: ""               # 默认标签查询；可被 #开盲盒 … / API tag 覆盖
+  order_by: view        # tag 搜索排序：view|like|score|latest
+  time: week            # tag 搜索时间窗：week|month|today|all
+  pages: 2              # tag 搜索合并页数（1–5），从 page 起向后翻
   ranking: day          # day | week | month（无 tag 时用）
   category: "0"         # 分类，0=全部
-  page: 1               # 搜索/排行榜页码
+  page: 1               # 搜索/排行榜起始页码
   seed_ids: []          # 非空时优先从此列表抽号（纯数字车牌）

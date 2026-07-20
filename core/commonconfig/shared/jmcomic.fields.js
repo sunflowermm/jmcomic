@@ -113,9 +113,32 @@ export default {
       tag: {
         type: 'string',
         label: '默认标签',
-        description: '非空则用 search_tag；指令 #开盲盒 标签 / AI tag 可临时覆盖',
+        description: '空格多标签：全彩 中文 → +全彩 +中文；也支持 +A -B',
         component: 'Input',
         default: ''
+      },
+      order_by: {
+        type: 'string',
+        label: '标签搜索排序',
+        description: 'view / like / score / latest',
+        component: 'Input',
+        default: 'view'
+      },
+      time: {
+        type: 'string',
+        label: '标签搜索时间窗',
+        description: 'week / month / today / all',
+        component: 'Input',
+        default: 'week'
+      },
+      pages: {
+        type: 'number',
+        label: '标签搜索页数',
+        description: '从 page 起合并若干页再抽（1–5）',
+        min: 1,
+        max: 5,
+        default: 2,
+        component: 'InputNumber'
       },
       ranking: {
         type: 'string',
@@ -125,7 +148,7 @@ export default {
         default: 'day'
       },
       category: { type: 'string', label: '分类 ID', component: 'Input', default: '0' },
-      page: { type: 'number', label: '搜索/排行榜页码', min: 1, default: 1, component: 'InputNumber' },
+      page: { type: 'number', label: '起始页码', min: 1, default: 1, component: 'InputNumber' },
       seed_ids: {
         type: 'array',
         label: '指定车牌池',

@@ -457,11 +457,163 @@ async def download_handler(request: Request):
         return _reject(album_id, str(exc))
 
 
-def _pick_blind_album_id(tag: str = "") -> Tuple[str, str]:
+def _parse_blind_tags(raw: str) -> Tuple[str, List[str], List[str]]:
+    """把用户/配置的 tag 文案规范成禁漫 search_tag 查询。
+
+    格式（空格分隔）：
+      全彩 中文          → +全彩 +中文（AND）
+      +全彩 +中文 -CG    → 原样保留 +/- 
+      单标签              → +单标签
+
+    Returns:
+        (search_query, include_tags, exclude_tags)
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return "", [], []
+
+    # 已是禁漫布尔串（含 +/-）时，按空白拆词解析
+    tokens = [t for t in re.split(r"\s+", text) if t]
+    include: List[str] = []
+    exclude: List[str] = []
+    parts: List[str] = []
+
+    for tok in tokens:
+        if tok.startswith("-") and len(tok) > 1:
+            name = tok[1:].strip()
+            if name:
+                exclude.append(name)
+                parts.append(f"-{name}")
+        elif tok.startswith("+") and len(tok) > 1:
+            name = tok[1:].strip()
+            if name:
+                include.append(name)
+                parts.append(f"+{name}")
+        else:
+            name = tok.strip()
+            if name:
+                include.append(name)
+                parts.append(f"+{name}")
+
+    return " ".join(parts), include, exclude
+
+
+def _norm_tag_name(name: str) -> str:
+    s = str(name or "").strip()
+    if not s:
+        return ""
+    try:
+        from jmcomic import JmcomicText
+
+        return str(JmcomicText.to_zh_cn(s) or s).casefold()
+    except Exception:
+        return s.casefold()
+
+
+def _tag_list_match(tag_list: Any, include: List[str], exclude: List[str]) -> bool:
+    """用 iter_id_title_tag 返回的标签列表做二次校验（AND 含 include，不含 exclude）。"""
+    raw = tag_list if isinstance(tag_list, (list, tuple, set)) else []
+    have = {_norm_tag_name(t) for t in raw if t}
+    have.discard("")
+    for need in include:
+        n = _norm_tag_name(need)
+        if n and n not in have:
+            return False
+    for ban in exclude:
+        b = _norm_tag_name(ban)
+        if b and b in have:
+            return False
+    return True
+
+
+def _blind_search_order_time() -> Tuple[str, str]:
+    """配置 order_by / time → jmcomic 常量字符串。"""
+    from jmcomic import JmMagicConstants
+
+    order_key = str(config.get("blind_box.order_by", "view") or "view").lower()
+    order_map = {
+        "latest": JmMagicConstants.ORDER_BY_LATEST,
+        "mr": JmMagicConstants.ORDER_BY_LATEST,
+        "view": JmMagicConstants.ORDER_BY_VIEW,
+        "mv": JmMagicConstants.ORDER_BY_VIEW,
+        "like": JmMagicConstants.ORDER_BY_LIKE,
+        "tf": JmMagicConstants.ORDER_BY_LIKE,
+        "score": JmMagicConstants.ORDER_BY_SCORE,
+        "tr": JmMagicConstants.ORDER_BY_SCORE,
+    }
+    order_by = order_map.get(order_key, JmMagicConstants.ORDER_BY_VIEW)
+
+    time_key = str(config.get("blind_box.time", "week") or "week").lower()
+    time_map = {
+        "all": JmMagicConstants.TIME_ALL,
+        "a": JmMagicConstants.TIME_ALL,
+        "today": JmMagicConstants.TIME_TODAY,
+        "t": JmMagicConstants.TIME_TODAY,
+        "week": JmMagicConstants.TIME_WEEK,
+        "w": JmMagicConstants.TIME_WEEK,
+        "month": JmMagicConstants.TIME_MONTH,
+        "m": JmMagicConstants.TIME_MONTH,
+    }
+    time_v = time_map.get(time_key, JmMagicConstants.TIME_WEEK)
+    return order_by, time_v
+
+
+def _collect_tag_album_ids(client: Any, search_query: str, include: List[str], exclude: List[str]) -> List[str]:
+    """search_tag + 多页 + iter_id_title_tag 过滤。"""
+    category = str(config.get("blind_box.category", "0") or "0")
+    try:
+        start_page = max(1, int(config.get("blind_box.page", 1) or 1))
+    except (TypeError, ValueError):
+        start_page = 1
+    try:
+        page_count = max(1, min(int(config.get("blind_box.pages", 2) or 2), 5))
+    except (TypeError, ValueError):
+        page_count = 2
+
+    order_by, time_v = _blind_search_order_time()
+    ids: List[str] = []
+    seen: set[str] = set()
+
+    for offset in range(page_count):
+        page_no = start_page + offset
+        page_obj = client.search_tag(
+            search_query,
+            page=page_no,
+            order_by=order_by,
+            time=time_v,
+            category=category,
+        )
+        matched = 0
+        for aid, _title, tag_list in page_obj.iter_id_title_tag():
+            album_id = str(aid)
+            if not _ALBUM_ID_RE.fullmatch(album_id) or album_id in seen:
+                continue
+            if include or exclude:
+                if not _tag_list_match(tag_list, include, exclude):
+                    continue
+            seen.add(album_id)
+            ids.append(album_id)
+            matched += 1
+        logger.info(
+            "[盲盒] search_tag page=%s query=%r hit=%s pool=%s order=%s time=%s",
+            page_no,
+            search_query,
+            matched,
+            len(ids),
+            order_by,
+            time_v,
+        )
+        if not matched and offset > 0:
+            break
+
+    return ids
+
+
+def _pick_blind_album_id(tag: str = "") -> Tuple[str, str, str]:
     """抽一个车牌号。优先级：seed_ids → tag 搜索 → 日/周/月榜。
 
     Returns:
-        (album_id, source)  source 为 seed | tag | ranking
+        (album_id, source, tag_query)  source 为 seed | tag | ranking
     """
     import random
 
@@ -472,9 +624,11 @@ def _pick_blind_album_id(tag: str = "") -> Tuple[str, str]:
         if _ALBUM_ID_RE.fullmatch(str(x).strip())
     ]
     if seed_ids:
-        return random.choice(seed_ids), "seed"
+        return random.choice(seed_ids), "seed", ""
 
-    tag_q = (tag or config.get("blind_box.tag") or "").strip()
+    raw_tag = (tag or config.get("blind_box.tag") or "").strip()
+    search_query, include, exclude = _parse_blind_tags(raw_tag)
+
     category = str(config.get("blind_box.category", "0") or "0")
     try:
         page = max(1, int(config.get("blind_box.page", 1) or 1))
@@ -485,13 +639,14 @@ def _pick_blind_album_id(tag: str = "") -> Tuple[str, str]:
     option = _build_option(download_dir)
     client = option.new_jm_client()
 
-    if tag_q:
-        logger.info("[盲盒] 按 tag 抽号: %s page=%s", tag_q, page)
-        page_obj = client.search_tag(tag_q, page=page, category=category)
-        ids = [str(aid) for aid, _title in page_obj.iter_id_title() if _ALBUM_ID_RE.fullmatch(str(aid))]
+    if search_query:
+        logger.info("[盲盒] 按 tag 抽号 query=%r include=%s exclude=%s", search_query, include, exclude)
+        ids = _collect_tag_album_ids(client, search_query, include, exclude)
         if not ids:
-            raise ValueError(f"标签「{tag_q}」无可用本子，请换 tag 或检查网络")
-        return random.choice(ids), "tag"
+            raise ValueError(
+                f"标签「{raw_tag}」无匹配本子（已按 +/- 与标签列表校验）。可换词、减少限制或检查网络"
+            )
+        return random.choice(ids), "tag", search_query
 
     ranking = str(config.get("blind_box.ranking", "day") or "day").lower()
     if ranking == "week":
@@ -504,12 +659,12 @@ def _pick_blind_album_id(tag: str = "") -> Tuple[str, str]:
     ids = [str(aid) for aid, _title in page_obj.iter_id_title() if _ALBUM_ID_RE.fullmatch(str(aid))]
     if not ids:
         raise ValueError("排行榜无可用本子，请检查网络或配置 blind_box.seed_ids / tag")
-    return random.choice(ids), "ranking"
+    return random.choice(ids), "ranking", ""
 
 
 def _blind_box_sync(tag: str = "") -> Dict[str, Any]:
     try:
-        album_id, pick_source = _pick_blind_album_id(tag)
+        album_id, pick_source, tag_query = _pick_blind_album_id(tag)
     except Exception as exc:
         logger.error("[盲盒] 抽号失败: %s", exc, exc_info=True)
         return {"ok": False, "error": f"抽号失败: {exc}", "album_id": ""}
@@ -518,13 +673,16 @@ def _blind_box_sync(tag: str = "") -> Dict[str, Any]:
     if isinstance(result, dict):
         result["source"] = "blind_box"
         result["pick_source"] = pick_source
-        if tag or config.get("blind_box.tag"):
-            result["tag"] = (tag or config.get("blind_box.tag") or "").strip()
+        raw_tag = (tag or config.get("blind_box.tag") or "").strip()
+        if raw_tag:
+            result["tag"] = raw_tag
+        if tag_query:
+            result["tag_query"] = tag_query
     return result
 
 
 async def blind_box_handler(request: Request):
-    # 固定开 1 本；body 可选 { "tag": "全彩" }
+    # 固定开 1 本；body 可选 { "tag": "全彩 中文" } 或 "+全彩 +中文 -CG"
     body: Dict[str, Any] = {}
     try:
         raw = await request.json()
@@ -534,9 +692,9 @@ async def blind_box_handler(request: Request):
         pass
 
     tag = str(body.get("tag") or body.get("tags") or "").strip()
-    # 仅允许标签文案，拒绝纯数字（避免和旧「份数」混淆）
+    # 整串纯数字拒绝（避免和旧「份数」混淆）；多 tag 空格串允许
     if tag and _ALBUM_ID_RE.fullmatch(tag):
-        raise HTTPException(status_code=400, detail="tag 不能为纯数字")
+        raise HTTPException(status_code=400, detail="tag 不能为纯数字；多标签请空格分隔，例：全彩 中文")
 
     timeout_sec = int(config.get("limits.download_timeout_sec", 1800) or 1800)
     semaphore, executor = _ensure_download_pool()

@@ -56,7 +56,7 @@ qq:
 blind_box:
   tag: ""               # 默认标签查询；可被 #开盲盒 … / API tag 覆盖
   order_by: view        # tag 搜索排序：view|like|score|latest
-  time: week            # tag 搜索时间窗：week|month|today|all
+  time: all             # tag 搜索时间窗：all|week|month|today（过窄易空，推荐 all）
   pages: 2              # tag 搜索合并页数（1–5），从 page 起向后翻
   ranking: day          # day | week | month（无 tag 时用）
   category: "0"         # 分类，0=全部

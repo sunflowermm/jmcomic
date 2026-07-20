@@ -510,23 +510,46 @@ def _norm_tag_name(name: str) -> str:
         return s.casefold()
 
 
-def _tag_list_match(tag_list: Any, include: List[str], exclude: List[str]) -> bool:
-    """用 iter_id_title_tag 返回的标签列表做二次校验（AND 含 include，不含 exclude）。"""
+def _tag_token_hit(need: str, have: set[str]) -> bool:
+    """精确或互相包含（ロリ / 萝莉 / ロリコン 等）。"""
+    n = _norm_tag_name(need)
+    if not n:
+        return True
+    if n in have:
+        return True
+    for h in have:
+        if not h:
+            continue
+        if n in h or h in n:
+            return True
+    return False
+
+
+def _tag_list_match(tag_list: Any, include: List[str], exclude: List[str], *, soft: bool = True) -> bool:
+    """用 iter_id_title_tag 返回的标签列表做二次校验。"""
     raw = tag_list if isinstance(tag_list, (list, tuple, set)) else []
     have = {_norm_tag_name(t) for t in raw if t}
     have.discard("")
     for need in include:
-        n = _norm_tag_name(need)
-        if n and n not in have:
-            return False
+        if soft:
+            if not _tag_token_hit(need, have):
+                return False
+        else:
+            n = _norm_tag_name(need)
+            if n and n not in have:
+                return False
     for ban in exclude:
-        b = _norm_tag_name(ban)
-        if b and b in have:
-            return False
+        if soft:
+            if _tag_token_hit(ban, have):
+                return False
+        else:
+            b = _norm_tag_name(ban)
+            if b and b in have:
+                return False
     return True
 
 
-def _blind_search_order_time() -> Tuple[str, str]:
+def _blind_search_order_time(time_override: Optional[str] = None) -> Tuple[str, str]:
     """配置 order_by / time → jmcomic 常量字符串。"""
     from jmcomic import JmMagicConstants
 
@@ -543,7 +566,11 @@ def _blind_search_order_time() -> Tuple[str, str]:
     }
     order_by = order_map.get(order_key, JmMagicConstants.ORDER_BY_VIEW)
 
-    time_key = str(config.get("blind_box.time", "week") or "week").lower()
+    time_key = str(
+        time_override
+        if time_override is not None
+        else (config.get("blind_box.time", "all") or "all")
+    ).lower()
     time_map = {
         "all": JmMagicConstants.TIME_ALL,
         "a": JmMagicConstants.TIME_ALL,
@@ -554,12 +581,20 @@ def _blind_search_order_time() -> Tuple[str, str]:
         "month": JmMagicConstants.TIME_MONTH,
         "m": JmMagicConstants.TIME_MONTH,
     }
-    time_v = time_map.get(time_key, JmMagicConstants.TIME_WEEK)
+    time_v = time_map.get(time_key, JmMagicConstants.TIME_ALL)
     return order_by, time_v
 
 
-def _collect_tag_album_ids(client: Any, search_query: str, include: List[str], exclude: List[str]) -> List[str]:
-    """search_tag + 多页 + iter_id_title_tag 过滤。"""
+def _collect_tag_album_ids(
+    client: Any,
+    search_query: str,
+    include: List[str],
+    exclude: List[str],
+    *,
+    time_override: Optional[str] = None,
+    require_include: bool = True,
+) -> List[str]:
+    """search_tag + 多页；可选标签列表校验。"""
     category = str(config.get("blind_box.category", "0") or "0")
     try:
         start_page = max(1, int(config.get("blind_box.page", 1) or 1))
@@ -570,7 +605,7 @@ def _collect_tag_album_ids(client: Any, search_query: str, include: List[str], e
     except (TypeError, ValueError):
         page_count = 2
 
-    order_by, time_v = _blind_search_order_time()
+    order_by, time_v = _blind_search_order_time(time_override)
     ids: List[str] = []
     seen: set[str] = set()
 
@@ -583,27 +618,33 @@ def _collect_tag_album_ids(client: Any, search_query: str, include: List[str], e
             time=time_v,
             category=category,
         )
+        raw_n = 0
         matched = 0
         for aid, _title, tag_list in page_obj.iter_id_title_tag():
             album_id = str(aid)
             if not _ALBUM_ID_RE.fullmatch(album_id) or album_id in seen:
                 continue
-            if include or exclude:
-                if not _tag_list_match(tag_list, include, exclude):
+            raw_n += 1
+            # 排除标签始终校验；包含标签可按 require_include 放宽（信任 search_tag）
+            check_include = include if require_include else []
+            if check_include or exclude:
+                if not _tag_list_match(tag_list, check_include, exclude, soft=True):
                     continue
             seen.add(album_id)
             ids.append(album_id)
             matched += 1
         logger.info(
-            "[盲盒] search_tag page=%s query=%r hit=%s pool=%s order=%s time=%s",
+            "[盲盒] search_tag page=%s query=%r raw=%s hit=%s pool=%s order=%s time=%s strict_include=%s",
             page_no,
             search_query,
+            raw_n,
             matched,
             len(ids),
             order_by,
             time_v,
+            require_include,
         )
-        if not matched and offset > 0:
+        if raw_n == 0 and offset > 0:
             break
 
     return ids
@@ -641,10 +682,22 @@ def _pick_blind_album_id(tag: str = "") -> Tuple[str, str, str]:
 
     if search_query:
         logger.info("[盲盒] 按 tag 抽号 query=%r include=%s exclude=%s", search_query, include, exclude)
-        ids = _collect_tag_album_ids(client, search_query, include, exclude)
+        # 1) 配置时间窗 + 标签软校验
+        ids = _collect_tag_album_ids(client, search_query, include, exclude, require_include=True)
+        # 2) 仍空：信任 search_tag 结果，只保留 -排除
+        if not ids:
+            logger.info("[盲盒] 标签软校验无命中，回退为搜索结果（仅排除校验）")
+            ids = _collect_tag_album_ids(client, search_query, include, exclude, require_include=False)
+        # 3) 仍空且当前不是 all：放宽时间窗再试
+        cfg_time = str(config.get("blind_box.time", "all") or "all").lower()
+        if not ids and cfg_time not in ("all", "a"):
+            logger.info("[盲盒] 时间窗 %s 无结果，回退 time=all", cfg_time)
+            ids = _collect_tag_album_ids(
+                client, search_query, include, exclude, time_override="all", require_include=False
+            )
         if not ids:
             raise ValueError(
-                f"标签「{raw_tag}」无匹配本子（已按 +/- 与标签列表校验）。可换词、减少限制或检查网络"
+                f"标签「{raw_tag}」无可用本子。可换中文标签、去掉 -排除，或检查代理/网络"
             )
         return random.choice(ids), "tag", search_query
 

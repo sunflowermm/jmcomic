@@ -127,9 +127,9 @@ export default {
       time: {
         type: 'string',
         label: '标签搜索时间窗',
-        description: 'week / month / today / all',
+        description: 'all / week / month / today（推荐 all，week 易空）',
         component: 'Input',
-        default: 'week'
+        default: 'all'
       },
       pages: {
         type: 'number',

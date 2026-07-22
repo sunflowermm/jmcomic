@@ -4,32 +4,18 @@ import CommonConfigRegistry from '#infrastructure/commonconfig/loader.js'
 import { buildSubserverFileLink } from '#utils/subserver-file-proxy.js'
 import { formatSubserverError, getSubserverConfig } from '#utils/subserver-client.js'
 import { normalizeError } from '#utils/normalize-error.js'
-import { extractMsgIds, scheduleMsgRecall } from '#utils/msg-recall.js'
+import { extractMsgIds } from '#utils/msg-recall.js'
 
-const RECALL_DELAY_MS = 120_000
 const DOWNLOAD_TIMEOUT_MS = 600_000
 const DEFAULT_CACHE_MAX_FILES = 15
-const RECALL_TAG = '车牌撤回'
-
-/** 本段 reply 起点；发完后 slice 交给 scheduleMsgRecall（setupReply 已写入 e._sentMsgIds） */
-function recallFrom(e) {
-  return (e._sentMsgIds ||= []).length
-}
-
-function scheduleSince(e, from) {
-  const ids = (e._sentMsgIds || []).slice(from)
-  if (!ids.length) return false
-  return scheduleMsgRecall(e, ids, {
-    delayMs: RECALL_DELAY_MS,
-    logTag: RECALL_TAG,
-  })
-}
+/** QQ 可撤回窗口约 2 分钟；reply 时立刻 schedule（见 loader-deal recallMsg） */
+const RECALL_SEC = 120
 
 export class ChepaiPlugin extends PluginBase {
   constructor() {
     super({
       name: '车牌插件',
-      dsc: '#车牌；#开盲盒 [标签…]；进度/车牌/直链/PDF 两分钟一并撤回',
+      dsc: '#车牌；#开盲盒 [标签…]；进度/车牌/直链/PDF 用 reply.recallMsg 定时撤回',
       event: 'message',
       priority: 5000,
       rule: [
@@ -39,21 +25,20 @@ export class ChepaiPlugin extends PluginBase {
     })
   }
 
+  /** 业务临时消息：发出即预约撤回，不兼撤用户原指令 */
   async _replyText(msg) {
-    return this.reply(msg, true)
+    return this.reply(msg, true, { recallMsg: RECALL_SEC, recallUser: false })
   }
 
   async downloadPdf() {
     const albumId = (this.e.msg || '').replace(/^#车牌\s*/, '').trim()
     if (!/^\d+$/.test(albumId)) {
-      await this._replyText('请输入有效本子 ID，例：#车牌123456')
+      await this.reply('请输入有效本子 ID，例：#车牌123456', true)
       return false
     }
 
-    const from = recallFrom(this.e)
     await this._replyText('正在处理，请稍候…')
     await this._downloadAndDeliver(albumId)
-    scheduleSince(this.e, from)
     return true
   }
 
@@ -61,13 +46,13 @@ export class ChepaiPlugin extends PluginBase {
     const m = String(this.e.msg || '').match(/^#开盲盒(?:\s+(.+))?$/)
     const tag = String(m?.[1] || '').trim()
     if (tag && /^\d+$/.test(tag)) {
-      await this._replyText(
-        '开盲盒 tag 不能为纯数字。多标签空格分隔，例：#开盲盒 全彩 中文\n也可用：#开盲盒 +全彩 +中文 -CG'
+      await this.reply(
+        '开盲盒 tag 不能为纯数字。多标签空格分隔，例：#开盲盒 全彩 中文\n也可用：#开盲盒 +全彩 +中文 -CG',
+        true
       )
       return true
     }
 
-    const from = recallFrom(this.e)
     await this._replyText(tag ? `开盲盒（${tag}）中，抽号并下载…` : '开盲盒中，抽号并下载…')
 
     try {
@@ -78,7 +63,6 @@ export class ChepaiPlugin extends PluginBase {
 
       if (!result?.ok || !result.pdf_path) {
         await this._replyText(result?.error || result?.reason || '开盲盒失败')
-        scheduleSince(this.e, from)
         return true
       }
 
@@ -88,13 +72,11 @@ export class ChepaiPlugin extends PluginBase {
         `[盲盒] 抽到 album=${result.album_id} source=${result.pick_source || ''} query=${result.tag_query || ''}`
       )
       await this._deliverOneResult(result)
-      scheduleSince(this.e, from)
       return true
     } catch (err) {
       const hint = formatSubserverError(err, getSubserverConfig())
       logger.error(`[盲盒] 失败: ${hint}`)
       await this._replyText(hint)
-      scheduleSince(this.e, from)
       return true
     }
   }
@@ -211,7 +193,10 @@ export class ChepaiPlugin extends PluginBase {
     const url = await this._buildDirectLinkUrl(result)
     if (url) await this._replyText(`PDF 正在上传群文件，可先下载：\n${url}`)
 
-    const fileRes = await this.reply([msgSegment.file(pdfPath, fileName)])
+    const fileRes = await this.reply([msgSegment.file(pdfPath, fileName)], false, {
+      recallMsg: RECALL_SEC,
+      recallUser: false,
+    })
     if (fileRes && !fileRes.error && fileRes !== false) {
       if (!extractMsgIds(fileRes).length) {
         logger.warn(`[车牌] PDF 已发送但未解析到 message_id album=${albumId}`)

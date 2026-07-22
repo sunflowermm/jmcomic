@@ -1,35 +1,20 @@
 /**
  * jmcomic AI 工作流 — MCP：车牌下载 / 开盲盒
  *
- * 有会话：子服 API → 车牌插件交付；e._sentMsgIds 切片后两分钟一并撤回。
+ * 有会话：子服 API → 车牌插件交付；临时文案用 reply.recallMsg 发出即预约撤回。
  */
 import AiWorkflow from '#infrastructure/ai-workflow/ai-workflow.js'
 import { getWorkflowRequestContext } from '#infrastructure/ai-workflow/workflow-request-context.js'
 import RuntimeUtil from '#utils/runtime-util.js'
 import { formatSubserverError, getSubserverConfig } from '#utils/subserver-client.js'
-import { scheduleMsgRecall } from '#utils/msg-recall.js'
 import { ChepaiPlugin } from '../plugin/车牌.js'
 
 const DOWNLOAD_TIMEOUT_MS = 600_000
-const RECALL_DELAY_MS = 120_000
-const RECALL_TAG = '车牌撤回'
+const RECALL_SEC = 120
 
 function digitsOnly(raw) {
   const s = String(raw ?? '').trim()
   return /^\d+$/.test(s) ? s : null
-}
-
-function recallFrom(e) {
-  return (e._sentMsgIds ||= []).length
-}
-
-function scheduleSince(e, from) {
-  const ids = (e._sentMsgIds || []).slice(from)
-  if (!ids.length) return false
-  return scheduleMsgRecall(e, ids, {
-    delayMs: RECALL_DELAY_MS,
-    logTag: RECALL_TAG,
-  })
 }
 
 export default class JmcomicStream extends AiWorkflow {
@@ -106,7 +91,7 @@ export default class JmcomicStream extends AiWorkflow {
   }
 
   async _replyQuote(e, msg) {
-    if (e?.reply) await e.reply(msg, true)
+    if (e?.reply) await e.reply(msg, true, { recallMsg: RECALL_SEC, recallUser: false })
   }
 
   async _deliverToSession(e, result, tag = '[车牌]') {
@@ -152,12 +137,10 @@ export default class JmcomicStream extends AiWorkflow {
 
   async _runDownload(albumId) {
     const e = this._sessionEvent()
-    const from = e ? recallFrom(e) : 0
     try {
       await this._replyQuote(e, `正在下载车牌 ${albumId}…`)
       const result = await this._callDownloadApi(albumId)
       if (e) await this._deliverToSession(e, result, '[车牌]')
-      if (e) scheduleSince(e, from)
       return this.successResponse({
         mode: e ? 'session' : 'api',
         delivered: Boolean(e),
@@ -167,14 +150,12 @@ export default class JmcomicStream extends AiWorkflow {
       const hint = formatSubserverError(err, getSubserverConfig())
       RuntimeUtil.makeLog('error', `[车牌] API 失败: ${hint}`, 'JmcomicStream')
       try { await this._replyQuote(e, hint) } catch { /* ignore */ }
-      if (e) scheduleSince(e, from)
       return this.errorResponse('SUBSERVER_ERROR', hint)
     }
   }
 
   async _runBlindBox(tag = '') {
     const e = this._sessionEvent()
-    const from = e ? recallFrom(e) : 0
     try {
       await this._replyQuote(e, tag ? `开盲盒（tag:${tag}）中，抽号并下载…` : '开盲盒中，抽号并下载…')
       RuntimeUtil.makeLog('info', `[盲盒] 开始抽号${tag ? ` tag=${tag}` : ''}`, 'JmcomicStream')
@@ -189,7 +170,6 @@ export default class JmcomicStream extends AiWorkflow {
         await this._replyQuote(e, `抽到车牌：${result.album_id}${tagHint}`)
         await this._deliverToSession(e, result, '[盲盒]')
       }
-      if (e) scheduleSince(e, from)
       return this.successResponse({
         mode: e ? 'session' : 'api',
         delivered: Boolean(e),
@@ -200,7 +180,6 @@ export default class JmcomicStream extends AiWorkflow {
       const hint = formatSubserverError(err, getSubserverConfig())
       RuntimeUtil.makeLog('error', `[盲盒] 失败: ${hint}`, 'JmcomicStream')
       try { await this._replyQuote(e, hint) } catch { /* ignore */ }
-      if (e) scheduleSince(e, from)
       return this.errorResponse('SUBSERVER_ERROR', hint)
     }
   }

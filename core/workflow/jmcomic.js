@@ -24,7 +24,9 @@ function recallFrom(e) {
 }
 
 function scheduleSince(e, from) {
-  return scheduleMsgRecall(e, e._sentMsgIds.slice(from), {
+  const ids = (e._sentMsgIds || []).slice(from)
+  if (!ids.length) return false
+  return scheduleMsgRecall(e, ids, {
     delayMs: RECALL_DELAY_MS,
     logTag: RECALL_TAG,
   })

@@ -34,7 +34,7 @@ apis/jmcomic/
 
 - `#车牌123456` / `#开盲盒` / `#开盲盒 全彩 中文` / `#开盲盒 +全彩 +中文 -CG`
 - tag：空格多标签 → `+A +B`；`iter_id_title_tag` 二次校验；`order_by`/`time`/`pages` 可配
-- 文字、直链、PDF 群文件：交付完成后两分钟同时撤回（`#utils/msg-recall`）
+- 进度/车牌/直链/PDF：交付完成后两分钟一并撤回（`e._sentMsgIds` + `scheduleMsgRecall`）
 
 ## AI
 

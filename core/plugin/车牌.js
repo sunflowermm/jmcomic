@@ -11,15 +11,23 @@ const DOWNLOAD_TIMEOUT_MS = 600_000
 const DEFAULT_CACHE_MAX_FILES = 15
 const RECALL_TAG = '车牌撤回'
 
-function scheduleAll(e, msgIds) {
-  return scheduleMsgRecall(e, msgIds, { delayMs: RECALL_DELAY_MS, logTag: RECALL_TAG })
+/** 本段 reply 起点；发完后 slice 交给 scheduleMsgRecall（setupReply 已写入 e._sentMsgIds） */
+function recallFrom(e) {
+  return (e._sentMsgIds ||= []).length
+}
+
+function scheduleSince(e, from) {
+  return scheduleMsgRecall(e, e._sentMsgIds.slice(from), {
+    delayMs: RECALL_DELAY_MS,
+    logTag: RECALL_TAG,
+  })
 }
 
 export class ChepaiPlugin extends PluginBase {
   constructor() {
     super({
       name: '车牌插件',
-      dsc: '#车牌；#开盲盒 [标签…]（空格多标签）；文字/直链/PDF 两分钟同时撤回',
+      dsc: '#车牌；#开盲盒 [标签…]；进度/车牌/直链/PDF 两分钟一并撤回',
       event: 'message',
       priority: 5000,
       rule: [
@@ -29,10 +37,8 @@ export class ChepaiPlugin extends PluginBase {
     })
   }
 
-  /** 文字/链接：引用；收集 id，交付完成后再统一定时撤回 */
   async _replyText(msg) {
-    const res = await this.reply(msg, true)
-    return extractMsgIds(res)
+    return this.reply(msg, true)
   }
 
   async downloadPdf() {
@@ -42,13 +48,13 @@ export class ChepaiPlugin extends PluginBase {
       return false
     }
 
-    const ids = [...(await this._replyText('正在处理，请稍候…'))]
-    ids.push(...(await this._downloadAndDeliver(albumId)))
-    scheduleAll(this.e, ids)
+    const from = recallFrom(this.e)
+    await this._replyText('正在处理，请稍候…')
+    await this._downloadAndDeliver(albumId)
+    scheduleSince(this.e, from)
     return true
   }
 
-  /** #开盲盒 [标签] — 固定开 1 本；文字+链接+PDF 一并撤回 */
   async 盲盒() {
     const m = String(this.e.msg || '').match(/^#开盲盒(?:\s+(.+))?$/)
     const tag = String(m?.[1] || '').trim()
@@ -59,11 +65,8 @@ export class ChepaiPlugin extends PluginBase {
       return true
     }
 
-    const ids = [
-      ...(await this._replyText(
-        tag ? `开盲盒（${tag}）中，抽号并下载…` : '开盲盒中，抽号并下载…'
-      )),
-    ]
+    const from = recallFrom(this.e)
+    await this._replyText(tag ? `开盲盒（${tag}）中，抽号并下载…` : '开盲盒中，抽号并下载…')
 
     try {
       const result = await AgentRuntime.callSubserver('/api/jmcomic/blind-box', {
@@ -72,31 +75,29 @@ export class ChepaiPlugin extends PluginBase {
       })
 
       if (!result?.ok || !result.pdf_path) {
-        ids.push(...(await this._replyText(result?.error || result?.reason || '开盲盒失败')))
-        scheduleAll(this.e, ids)
+        await this._replyText(result?.error || result?.reason || '开盲盒失败')
+        scheduleSince(this.e, from)
         return true
       }
 
       const tagHint = result.tag_query || result.tag ? `（${result.tag_query || result.tag}）` : ''
-      ids.push(...(await this._replyText(`抽到车牌：${result.album_id}${tagHint}`)))
+      await this._replyText(`抽到车牌：${result.album_id}${tagHint}`)
       logger.info(
         `[盲盒] 抽到 album=${result.album_id} source=${result.pick_source || ''} query=${result.tag_query || ''}`
       )
-      ids.push(...(await this._deliverOneResult(result)))
-      scheduleAll(this.e, ids)
+      await this._deliverOneResult(result)
+      scheduleSince(this.e, from)
       return true
     } catch (err) {
       const hint = formatSubserverError(err, getSubserverConfig())
       logger.error(`[盲盒] 失败: ${hint}`)
-      ids.push(...(await this._replyText(hint)))
-      scheduleAll(this.e, ids)
+      await this._replyText(hint)
+      scheduleSince(this.e, from)
       return true
     }
   }
 
-  /** @returns {Promise<Array<string|number>>} */
   async _downloadAndDeliver(albumId) {
-    const ids = []
     try {
       const result = await AgentRuntime.callSubserver('/api/jmcomic/download', {
         body: { album_id: albumId },
@@ -106,28 +107,19 @@ export class ChepaiPlugin extends PluginBase {
       if (!result?.ok || !result.pdf_path) {
         const reason = result?.error || result?.reason || '处理失败'
         const detail = result?.detail ? `\n（${result.detail}）` : ''
-        ids.push(...(await this._replyText(`${reason}${detail}`)))
-        return ids
+        await this._replyText(`${reason}${detail}`)
+        return
       }
 
-      if (result.cached) {
-        logger.info(`[车牌] 子服务命中已有 PDF album=${albumId}`)
-      }
-
-      ids.push(...(await this._deliverOneResult(result)))
-      return ids
+      if (result.cached) logger.info(`[车牌] 子服务命中已有 PDF album=${albumId}`)
+      await this._deliverOneResult(result)
     } catch (err) {
       const hint = formatSubserverError(err, getSubserverConfig())
       logger.error(`[车牌] 失败: ${hint}`)
-      ids.push(...(await this._replyText(hint)))
-      return ids
+      await this._replyText(hint)
     }
   }
 
-  /**
-   * 交付：直链（引用）+ PDF 群文件（不引用）；返回全部 message_id
-   * @returns {Promise<Array<string|number>>}
-   */
   async _deliverOneResult(result) {
     const albumId = String(result.album_id || '')
     const fileName = result.pdf_name || path.basename(result.pdf_path)
@@ -144,7 +136,7 @@ export class ChepaiPlugin extends PluginBase {
     try {
       await fs.access(localPath)
       return localPath
-    } catch { /* 远程子服务，本地无 PDF */ }
+    } catch { /* 远程子服务 */ }
 
     const cachePath = path.join(process.cwd(), 'data/jmcomic/cache', `${albumId}.pdf`)
     try {
@@ -153,7 +145,7 @@ export class ChepaiPlugin extends PluginBase {
         logger.info(`[车牌] 使用本地缓存 album=${albumId}`)
         return cachePath
       }
-    } catch { /* 需从子服务拉取 */ }
+    } catch { /* 拉取 */ }
 
     await AgentRuntime.fetchSubserverToPath('/api/jmcomic/file', {
       query: { path: result.pdf_path },
@@ -187,20 +179,15 @@ export class ChepaiPlugin extends PluginBase {
         await fs.unlink(item.full).catch(() => {})
         removed += 1
       }
-      if (removed > 0) {
-        logger.info(`[车牌] 已清理 ${removed} 个过期 PDF 缓存`)
-      }
-    } catch {
-      /* cache 目录不存在时忽略 */
-    }
+      if (removed > 0) logger.info(`[车牌] 已清理 ${removed} 个过期 PDF 缓存`)
+    } catch { /* ignore */ }
   }
 
   async _readJmConfig() {
     const entry = CommonConfigRegistry.get('jmcomic')
     if (entry?.read) {
       try {
-        const data = await entry.read()
-        return this._pickQqFields(data)
+        return this._pickQqFields(await entry.read())
       } catch (err) {
         logger.debug(`[车牌] 读取 jmcomic 配置失败: ${normalizeError(err).message}`)
       }
@@ -209,11 +196,9 @@ export class ChepaiPlugin extends PluginBase {
   }
 
   _pickQqFields(data) {
-    const raw = data?.qq?.cache_max_files
-    const n = Number(raw)
+    const n = Number(data?.qq?.cache_max_files)
     const cacheMaxFiles = Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_CACHE_MAX_FILES
-    const publicBaseUrl = String(data?.public_base_url || '').trim()
-    return { cacheMaxFiles, publicBaseUrl }
+    return { cacheMaxFiles, publicBaseUrl: String(data?.public_base_url || '').trim() }
   }
 
   async _deliverPdf(result, pdfPath, fileName, albumId) {
@@ -221,35 +206,23 @@ export class ChepaiPlugin extends PluginBase {
     const sizeMb = (stat.size / 1024 / 1024).toFixed(2)
     logger.info(`[车牌] PDF 就绪 album=${albumId} ${fileName} (${sizeMb}MB)`)
 
-    const msgIds = []
     const url = await this._buildDirectLinkUrl(result)
+    if (url) await this._replyText(`PDF 正在上传群文件，可先下载：\n${url}`)
 
-    if (url) {
-      msgIds.push(...(await this._replyText(`PDF 正在上传群文件，可先下载：\n${url}`)))
-    }
-
-    // 群文件：不引用，但仍收集 message_id 与文字/链接一并撤回
     const fileRes = await this.reply([msgSegment.file(pdfPath, fileName)])
     if (fileRes && !fileRes.error && fileRes !== false) {
-      const fileIds = extractMsgIds(fileRes)
-      if (!fileIds.length) {
-        logger.warn(`[车牌] PDF 已发送但未解析到 message_id，无法定时撤回群文件 album=${albumId}`)
+      if (!extractMsgIds(fileRes).length) {
+        logger.warn(`[车牌] PDF 已发送但未解析到 message_id album=${albumId}`)
       }
-      msgIds.push(...fileIds)
-      return msgIds
+      return
     }
 
     const reason = Error.isError(fileRes?.error) ? fileRes.error.message : '发送失败'
     logger.warn(`[车牌] 群文件发送失败 album=${albumId} (${sizeMb}MB): ${reason}`)
-
-    if (url) return msgIds
-
-    msgIds.push(
-      ...(await this._replyText(
-        `PDF 已就绪（${sizeMb}MB），群文件发送失败且无法生成公网直链。请在 server.yaml 配置 server.url，或在控制台「禁漫本子」配置 public_base_url`
-      ))
+    if (url) return
+    await this._replyText(
+      `PDF 已就绪（${sizeMb}MB），群文件发送失败且无法生成公网直链。请在 server.yaml 配置 server.url，或在控制台「禁漫本子」配置 public_base_url`
     )
-    return msgIds
   }
 
   async _buildDirectLinkUrl(result) {
